@@ -1,0 +1,1185 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OrgPulse - HR 분석 플랫폼</title>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <!-- Babel Standalone -->
+    <script src="https://unpkg.com/@babel/standalone@7.23.5/babel.min.js"></script>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Noto+Sans+KR:wght@300;400;500;700&display=swap" rel="stylesheet">
+    
+    <!-- Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <!-- Firebase SDK -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getFirestore, collection, onSnapshot, addDoc, deleteDoc, updateDoc, doc, setDoc, getDoc, getDocs, serverTimestamp, query, orderBy, where } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyDm0qnGzq8P3zBBqW_4qjlMd9aq-QKrDyU",
+            authDomain: "hr-manager-6635c.firebaseapp.com",
+            projectId: "hr-manager-6635c",
+            storageBucket: "hr-manager-6635c.firebasestorage.app",
+            messagingSenderId: "796639392690",
+            appId: "1:796639392690:web:6e88b74eab16b69118aaab",
+            measurementId: "G-GMXXY9EPXM"
+        };
+
+        try {
+            const app = initializeApp(firebaseConfig);
+            window.db = getFirestore(app);
+            window.auth = getAuth(app);
+            window.firestore = { collection, onSnapshot, addDoc, deleteDoc, updateDoc, doc, setDoc, getDoc, getDocs, serverTimestamp, query, orderBy, where };
+            window.firebaseAuth = { signInAnonymously, onAuthStateChanged };
+        } catch (e) { console.error("Firebase Init Error:", e); }
+    </script>
+
+    <style>
+        body { font-family: 'Inter', 'Noto Sans KR', sans-serif; background-color: #f3f4f6; }
+        .sidebar-item { transition: all 0.2s; }
+        .sidebar-item:hover, .sidebar-item.active { background-color: #eff6ff; color: #2563eb; }
+        .sidebar-item.active { border-right: 3px solid #2563eb; }
+        .fade-in { animation: fadeIn 0.3s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+        .chart-path { stroke-dasharray: 1000; stroke-dashoffset: 1000; animation: draw 2s ease-out forwards; }
+        @keyframes draw { to { stroke-dashoffset: 0; } }
+        /* Range Slider Custom Styling */
+        input[type=range] {
+            -webkit-appearance: none;
+            width: 100%;
+            background: transparent;
+        }
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            height: 20px; /* Larger touch target for mobile */
+            width: 20px;
+            border-radius: 50%;
+            background: #2563eb;
+            cursor: pointer;
+            margin-top: -8px;
+            box-shadow: 0 0 0 2px #fff, 0 0 0 4px #2563eb;
+        }
+        input[type=range]::-webkit-slider-runnable-track {
+            width: 100%;
+            height: 4px;
+            cursor: pointer;
+            background: #cbd5e1;
+            border-radius: 2px;
+        }
+        .action-item:hover .action-tools { opacity: 1; }
+        .action-tools { opacity: 0; transition: opacity 0.2s; }
+        /* Mobile specific adjustments */
+        @media (max-width: 768px) {
+            .action-tools { opacity: 1; } /* Always show tools on mobile since no hover */
+        }
+        
+        @media print {
+            .no-print { display: none !important; }
+            .print-only { display: block !important; }
+            body { background: white; }
+            #root { margin: 0; padding: 0; }
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useRef } = React;
+        const APP_ID = typeof __app_id !== 'undefined' ? __app_id : "hr_dashboard";
+        
+        // --- GOOGLE GEMINI API CONFIGURATION ---
+        const GEMINI_API_KEY = "AIzaSyA0rKgCRfje8p1bJByr8gqPprjkHoPhz7o"; 
+        
+        const Icon = ({ name, size = 20, className = "", color }) => {
+            const ref = useRef(null);
+            useEffect(() => {
+                if (!ref.current || !window.lucide) return;
+                const iconName = name.split('-').map(part => part.charAt(0).toUpperCase() + part.slice(1)).join('');
+                const iconData = window.lucide.icons[iconName];
+                if (!iconData) return;
+                const svgElement = window.lucide.createElement(iconData);
+                svgElement.setAttribute('width', size);
+                svgElement.setAttribute('height', size);
+                if (className) svgElement.setAttribute('class', `lucide lucide-${name} ${className}`);
+                if (color) svgElement.setAttribute('stroke', color);
+                ref.current.innerHTML = '';
+                ref.current.appendChild(svgElement);
+            }, [name, size, className, color]);
+            return <span ref={ref} style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }} />;
+        };
+
+        const Loading = () => (
+            <div className="flex justify-center items-center h-full min-h-[400px]">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+            </div>
+        );
+
+        const Badge = ({ type, text }) => {
+            const styles = {
+                critical: "bg-red-100 text-red-700 border-red-200",
+                warning: "bg-yellow-100 text-yellow-800 border-yellow-200",
+                good: "bg-green-100 text-green-700 border-green-200",
+                neutral: "bg-gray-100 text-gray-700 border-gray-200"
+            };
+            return <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold border ${styles[type] || styles.neutral}`}>{text}</span>;
+        };
+
+        const getFormattedPeriod = (year, month) => `${year}-${String(month).padStart(2, '0')}`;
+
+        // --- Shared Logic for Auto Calculation ---
+        const calculatePeriodStats = async (db, period, teamsList, silent = false) => {
+            const { collection, query, getDocs, getDoc, doc, setDoc, updateDoc, serverTimestamp } = window.firestore;
+            
+            try {
+                const q = query(collection(db, 'artifacts', APP_ID, 'public', 'data', 'survey_responses'));
+                const querySnapshot = await getDocs(q);
+                const currentDocs = querySnapshot.docs.filter(d => d.data().period === period);
+
+                if (currentDocs.length === 0) {
+                    if(!silent) alert(`현재 기간(${period})에 데이터가 없습니다.`);
+                    return;
+                }
+
+                let totalW = 0, totalR = 0, totalL = 0;
+                currentDocs.forEach(d => {
+                    const data = d.data();
+                    totalW += data.workload || 3;
+                    totalR += data.relationship || 3;
+                    totalL += data.leadership || 3;
+                });
+                const count = currentDocs.length;
+                
+                const avgW = totalW / count;
+                const avgR = totalR / count;
+                const avgL = totalL / count;
+                const overallAvg = (avgW + avgR + avgL) / 3;
+
+                const burnout = Math.round((avgW / 5) * 100);
+                const safety = avgR.toFixed(1);
+                const growth = Math.round((avgL / 5) * 100);
+                
+                let enps = Math.round((overallAvg - 3) * 50);
+                let enpsStr = String(enps);
+                if(enps > 0) enpsStr = "+" + enps;
+
+                await setDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'global_stats', period), {
+                    burnout: { label: "번아웃 리스크", value: `${burnout}%`, diff: "0" },
+                    safety: { label: "심리적 안전감", value: String(safety), diff: "0" },
+                    enps: { label: "몰입도 (eNPS)", value: enpsStr, diff: "0" },
+                    growth: { label: "성장 비전 공감", value: `${growth}%`, diff: "0" }
+                });
+
+                const chartRef = doc(db, 'artifacts', APP_ID, 'public', 'data', 'chart_stats', 'current');
+                const chartSnap = await getDoc(chartRef);
+                let currentTrend = [];
+                if (chartSnap.exists()) {
+                    currentTrend = chartSnap.data().trend || [];
+                }
+                
+                const newTrendItem = { label: period, value: String(enps) };
+                
+                const updatedTrend = [...currentTrend.filter(t => t.label !== period), newTrendItem].sort((a,b) => a.label.localeCompare(b.label));
+                await setDoc(chartRef, { trend: updatedTrend }, { merge: true });
+
+                const updatePromises = teamsList.map(async (team) => {
+                    const teamResponses = currentDocs.filter(d => d.data().teamId === team.id);
+                    if(teamResponses.length === 0) return;
+
+                    let tw=0, tr=0, tl=0;
+                    teamResponses.forEach(d => {
+                        const dat = d.data();
+                        tw += dat.workload||0; tr += dat.relationship||0; tl += dat.leadership||0;
+                    });
+                    const tc = teamResponses.length;
+                    const tAvgW = tw/tc;
+                    const tAvgR = tr/tc;
+                    const tAvgL = tl/tc;
+
+                    let newStatus = '양호';
+                    if (tAvgW >= 4.0 || tAvgR <= 2.5 || tAvgL <= 2.5) newStatus = '위험';
+
+                    await updateDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'team_stats', team.id), {
+                        status: newStatus,
+                        workload: tAvgW >= 4.0 ? '과부하' : '적정',
+                        conflict: tAvgR <= 2.5 ? '높음' : '낮음',
+                        leadership: tAvgL <= 2.5 ? '부족' : '보통',
+                        calculatedAt: serverTimestamp()
+                    });
+                });
+                await Promise.all(updatePromises);
+
+                if(!silent) alert(`데이터 산출 완료! (총 ${count}건 반영)\n팀 상태가 자동 업데이트되었습니다.`);
+                console.log(`[Auto-Calc] Metrics updated for ${period}. Count: ${count}`);
+
+            } catch(e) {
+                console.error("Auto Calc Error:", e);
+                if(!silent) alert("자동 산출 중 오류: " + e.message);
+            }
+        };
+
+        const AdminLoginModal = ({ onClose, onSuccess }) => {
+            const [password, setPassword] = useState("");
+            const [error, setError] = useState(false);
+            const TARGET_HASH = 1486289; 
+            const simpleHash = (str) => {
+                let hash = 0;
+                if (str.length === 0) return hash;
+                for (let i = 0; i < str.length; i++) {
+                    const char = str.charCodeAt(i);
+                    hash = ((hash << 5) - hash) + char;
+                    hash = hash & hash; 
+                }
+                return hash;
+            };
+            const handleSubmit = (e) => {
+                e.preventDefault();
+                if (simpleHash(password) === TARGET_HASH) { onSuccess(); onClose(); } 
+                else { setError(true); setPassword(""); }
+            };
+            return (
+                <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-[100] p-4 fade-in backdrop-blur-sm">
+                    <div className="bg-white rounded-xl shadow-2xl max-w-sm w-full p-8 border border-slate-200">
+                        <div className="text-center mb-6">
+                            <div className="w-12 h-12 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-3">
+                                <Icon name="lock" size={24} className="text-slate-700" />
+                            </div>
+                            <h2 className="text-xl font-bold text-slate-800">관리자 인증</h2>
+                        </div>
+                        <form onSubmit={handleSubmit} className="space-y-4">
+                            <input type="password" value={password} onChange={(e) => { setPassword(e.target.value); setError(false); }} className="w-full px-4 py-3 border border-slate-300 rounded-lg text-center tracking-widest text-lg" placeholder="비밀번호 입력" autoFocus />
+                            {error && <p className="text-red-500 text-xs text-center font-medium">비밀번호가 일치하지 않습니다.</p>}
+                            <div className="flex gap-2">
+                                <button type="button" onClick={onClose} className="flex-1 py-3 text-slate-600 bg-slate-100 rounded-lg hover:bg-slate-200">취소</button>
+                                <button type="submit" className="flex-1 py-3 text-white bg-slate-800 rounded-lg hover:bg-slate-900">확인</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            );
+        };
+
+        const ActionBoardWidget = ({ user }) => {
+            const [actions, setActions] = useState([]);
+            const [input, setInput] = useState("");
+            const [editingId, setEditingId] = useState(null);
+            const [editText, setEditText] = useState("");
+            const [deleteConfirmId, setDeleteConfirmId] = useState(null);
+
+            useEffect(() => { 
+                if(!user || !window.db) return; 
+                const q = window.firestore.query(window.firestore.collection(window.db, 'artifacts', APP_ID, 'public', 'data', 'action_items')); 
+                return window.firestore.onSnapshot(q, (snapshot) => { 
+                    const list = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                    list.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+                    setActions(list); 
+                }); 
+            }, [user]);
+
+            const handleAdd = async (e) => { 
+                e.preventDefault(); if(!input.trim()) return; 
+                await window.firestore.addDoc(window.firestore.collection(window.db, 'artifacts', APP_ID, 'public', 'data', 'action_items'), { text: input, completed: false, createdAt: window.firestore.serverTimestamp(), createdBy: user.uid }); setInput(""); 
+            };
+            const handleDelete = async (id) => { await window.firestore.deleteDoc(window.firestore.doc(window.db, 'artifacts', APP_ID, 'public', 'data', 'action_items', id)); setDeleteConfirmId(null); };
+            const handleRequestDelete = (id) => { if (deleteConfirmId === id) { handleDelete(id); } else { setDeleteConfirmId(id); setTimeout(() => setDeleteConfirmId(null), 3000); } };
+            const toggleStatus = async (action) => { await window.firestore.updateDoc(window.firestore.doc(window.db, 'artifacts', APP_ID, 'public', 'data', 'action_items', action.id), { completed: !action.completed }); };
+            const startEdit = (action) => { setEditingId(action.id); setEditText(action.text); };
+            const saveEdit = async () => { if(!editText.trim()) return; await window.firestore.updateDoc(window.firestore.doc(window.db, 'artifacts', APP_ID, 'public', 'data', 'action_items', editingId), { text: editText }); setEditingId(null); setEditText(""); };
+
+            return (
+                <div className="bg-white rounded-xl shadow-sm border border-slate-100 h-full flex flex-col">
+                    <div className="p-5 border-b border-slate-100 flex justify-between items-center bg-slate-50 rounded-t-xl">
+                        <h3 className="font-bold text-slate-800 text-sm">실행 과제 (Action Items)</h3>
+                        <div className="flex gap-2"><span className="text-xs bg-white px-2 py-1 rounded border text-slate-600">전체: {actions.length}건</span><span className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded border border-blue-200">진행 중: {actions.filter(a => !a.completed).length}건</span></div>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-4 space-y-2 max-h-[300px]">
+                        {actions.length === 0 && <p className="text-xs text-slate-400 text-center py-4">등록된 실행 과제가 없습니다.</p>}
+                        {actions.map(action => (
+                            <div key={action.id} className={`action-item flex gap-3 items-start p-3 border rounded-lg transition-all ${action.completed ? 'bg-slate-50 border-slate-100' : 'bg-white border-slate-200 hover:border-blue-300'}`}>
+                                <button onClick={() => toggleStatus(action)} className={`mt-0.5 flex-shrink-0 w-4 h-4 rounded border flex items-center justify-center transition-colors ${action.completed ? 'bg-green-500 border-green-500' : 'bg-white border-slate-300 hover:border-blue-400'}`} title={action.completed ? "완료됨 (다시 클릭하여 취소)" : "완료 처리"}>{action.completed && <Icon name="check" size={12} className="text-white" />}</button>
+                                <div className="flex-1 min-w-0">{editingId === action.id ? (<div className="flex gap-2 items-center animate-fade-in"><input value={editText} onChange={e => setEditText(e.target.value)} className="flex-1 text-xs border border-blue-300 rounded px-2 py-1 outline-none shadow-sm" autoFocus onKeyDown={e => { if(e.key === 'Enter') saveEdit(); else if(e.key === 'Escape') setEditingId(null); }} /><button onClick={saveEdit} className="text-green-600 hover:bg-green-50 p-1 rounded"><Icon name="check" size={14} /></button><button onClick={() => setEditingId(null)} className="text-red-500 hover:bg-red-50 p-1 rounded"><Icon name="x" size={14} /></button></div>) : (<p className={`text-xs break-words leading-relaxed cursor-pointer select-none ${action.completed ? 'text-slate-400 line-through' : 'text-slate-700'}`} onClick={() => startEdit(action)} title="클릭하여 수정">{action.text}</p>)}</div>
+                                {editingId !== action.id && (<div className="action-tools flex gap-1"><button onClick={() => startEdit(action)} className="text-slate-400 hover:text-blue-500 p-1 rounded hover:bg-blue-50 transition-colors" title="수정"><Icon name="pencil" size={14} /></button><button onClick={() => handleRequestDelete(action.id)} className={`p-1 rounded transition-colors ${deleteConfirmId === action.id ? 'bg-red-100 text-red-600' : 'text-slate-400 hover:text-red-500 hover:bg-red-50'}`} title={deleteConfirmId === action.id ? "삭제 확인 (한번 더 클릭)" : "삭제"}><Icon name={deleteConfirmId === action.id ? "alert-circle" : "trash-2"} size={14} /></button></div>)}
+                            </div>
+                        ))}
+                    </div>
+                    <form onSubmit={handleAdd} className="p-3 border-t bg-slate-50 rounded-b-xl flex gap-2"><input value={input} onChange={e => setInput(e.target.value)} placeholder="새로운 실행 과제 입력..." className="flex-1 px-3 py-2 text-xs border border-slate-200 rounded-lg focus:outline-none focus:border-blue-400 bg-white" /><button className="bg-blue-600 text-white px-4 py-2 rounded-lg text-xs font-bold hover:bg-blue-700 transition-colors shadow-sm">추가</button></form>
+                </div>
+            );
+        };
+
+        const SurveyView = ({ teamStats, currentPeriod }) => {
+            const [surveyData, setSurveyData] = useState({ teamId: "", workload: "3", relationship: "3", leadership: "3", keywords: "" });
+            const [submitted, setSubmitted] = useState(false);
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                if(!surveyData.teamId) return alert("소속 팀을 선택해주세요.");
+                try {
+                    await window.firestore.addDoc(window.firestore.collection(window.db, 'artifacts', APP_ID, 'public', 'data', 'survey_responses'), {
+                        teamId: surveyData.teamId,
+                        period: currentPeriod, 
+                        workload: Number(surveyData.workload),
+                        relationship: Number(surveyData.relationship),
+                        leadership: Number(surveyData.leadership),
+                        keywords: surveyData.keywords, // Added to save raw keywords with response
+                        createdAt: window.firestore.serverTimestamp()
+                    });
+
+                    const teamDoc = teamStats.find(t => t.id === surveyData.teamId);
+                    if(teamDoc) {
+                        const newKeywords = surveyData.keywords.split(',').map(k => k.trim()).filter(k => k);
+                        const updatedKeywords = [...(teamDoc.keywords || []), ...newKeywords];
+                        await window.firestore.updateDoc(window.firestore.doc(window.db, 'artifacts', APP_ID, 'public', 'data', 'team_stats', surveyData.teamId), { keywords: updatedKeywords });
+                    }
+                    
+                    await calculatePeriodStats(window.db, currentPeriod, teamStats, true); 
+
+                    setSubmitted(true);
+                } catch(e) { console.error(e); alert("제출 오류: " + e.message); }
+            };
+
+            if(submitted) return (
+                <div className="flex flex-col items-center justify-center h-full p-8 text-center animate-fade-in">
+                    <div className="w-16 h-16 bg-green-100 text-green-600 rounded-full flex items-center justify-center mb-4"><Icon name="check" size={32} className="text-green-600" /></div>
+                    <h2 className="text-2xl font-bold text-slate-800 mb-2">제출 완료</h2>
+                    <p className="text-slate-500 mb-6">소중한 의견이 안전하게 저장되었습니다.</p>
+                    <button onClick={() => { setSubmitted(false); setSurveyData({ teamId: "", workload: "3", relationship: "3", leadership: "3", keywords: "" }); }} className="text-blue-600 font-bold hover:underline">추가 제출하기</button>
+                </div>
+            );
+
+            return (
+                <div className="max-w-2xl mx-auto bg-white rounded-xl shadow-sm border border-slate-100 p-4 md:p-8 animate-fade-in my-4 md:my-10">
+                    <div className="text-center mb-6 md:mb-8"><h1 className="text-xl md:text-2xl font-bold text-slate-800">주간 조직 진단 (Weekly Pulse Survey)</h1></div>
+                    <form onSubmit={handleSubmit} className="space-y-6">
+                        <div>
+                            <label className="block text-sm font-bold text-slate-700 mb-2">소속 부서</label>
+                            <select value={surveyData.teamId} onChange={e => setSurveyData({...surveyData, teamId: e.target.value})} className="w-full px-4 py-3 border border-slate-200 rounded-lg bg-slate-50" required>
+                                <option value="">부서를 선택해주세요</option>
+                                {teamStats.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                            </select>
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                            {[{ id: 'workload', label: '업무량' }, { id: 'relationship', label: '동료 관계' }, { id: 'leadership', label: '리더십' }].map(f => (
+                                <div key={f.id} className="bg-slate-50 p-5 rounded-lg border border-slate-100">
+                                    <div className="flex justify-between items-end mb-4"><label className="block text-sm font-bold text-slate-700">{f.label}</label><span className="text-sm font-bold text-blue-600 bg-blue-50 px-2 rounded">{surveyData[f.id]}점</span></div>
+                                    <input type="range" min="1" max="5" value={surveyData[f.id]} onChange={e => setSurveyData({...surveyData, [f.id]: e.target.value})} className="w-full accent-blue-600" />
+                                    <div className="flex justify-between mt-2 px-1">{[1, 2, 3, 4, 5].map(num => (<div key={num} className="flex flex-col items-center cursor-pointer" onClick={() => setSurveyData({...surveyData, [f.id]: String(num)})}> <div className="h-1.5 w-px bg-slate-300 mb-1"></div><span className={`text-xs font-bold transition-all duration-200 ${String(surveyData[f.id]) === String(num) ? 'text-blue-600 scale-125' : 'text-slate-300'}`}>{num}</span></div>))}</div>
+                                </div>
+                            ))}
+                        </div>
+                        <div>
+                            <label className="block text-sm font-bold text-slate-700 mb-2">키워드 (쉼표 구분)</label>
+                            <input type="text" placeholder="예: 소통 부재, 야근..." value={surveyData.keywords} onChange={e => setSurveyData({...surveyData, keywords: e.target.value})} className="w-full px-4 py-3 border border-slate-200 rounded-lg" />
+                        </div>
+                        <button type="submit" className="w-full bg-blue-600 text-white py-4 rounded-xl font-bold hover:bg-blue-700 transition shadow-lg shadow-blue-200">익명 제출</button>
+                    </form>
+                </div>
+            );
+        };
+
+        const DashboardView = ({ globalMetrics, chartData, teamStats, currentPeriod, user }) => {
+            const KPICard = ({ metric }) => {
+                if(!metric) return null;
+                const valStr = String(metric.value);
+                const diffStr = String(metric.diff);
+                const isPositive = parseFloat(diffStr) >= 0;
+                return (
+                    <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100">
+                        <div className="flex justify-between items-start mb-4"><div className={`p-3 rounded-xl ${metric.color}`}><Icon name={metric.icon} size={24} /></div><span className={`flex items-center text-xs font-bold px-2 py-1 rounded-full ${isPositive ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>{isPositive ? '▲' : '▼'} {Math.abs(parseFloat(diffStr) || 0)}{metric.unit || ''}</span></div>
+                        <h3 className="text-slate-500 text-sm font-medium mb-1">{metric.label}</h3>
+                        <p className="text-2xl font-bold text-slate-800">{valStr}</p>
+                        <p className="text-xs text-slate-400 mt-2">vs 전월</p>
+                    </div>
+                );
+            };
+            const TrendChart = ({ data }) => {
+                if (!data || data.length === 0) {
+                    return (<div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100 h-full flex flex-col justify-center items-center text-center"><div className="bg-slate-100 p-3 rounded-full mb-3"><Icon name="bar-chart-2" size={24} className="text-slate-400" /></div><p className="text-slate-500 font-medium">데이터가 없습니다</p><p className="text-xs text-slate-400 mt-1">설정 메뉴에서 데이터를 입력하거나<br/>자동 산출 기능을 사용해보세요.</p></div>);
+                }
+                const maxVal = Math.max(...data.map(d => Number(d.value)), 100);
+                const points = data.map((d, i) => { const x = (i / (data.length - 1)) * 280 + 10; const y = 100 - (Number(d.value) / maxVal) * 80 - 10; return `${x},${y}`; }).join(" ");
+                return (<div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100 h-full"><h3 className="font-bold text-slate-800 mb-6 flex items-center gap-2"><Icon name="activity" size={20} className="text-blue-500" /> 몰입도(eNPS) 추이</h3><div className="relative h-40 w-full mt-4"><svg viewBox="0 0 300 100" className="w-full h-full overflow-visible"><polyline points={points} fill="none" stroke="#3b82f6" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" className="chart-path"/><div className="flex justify-between text-xs text-slate-400 mt-2">{data.map((d, i) => <span key={i}>{d.label}</span>)}</div></svg></div></div>);
+            };
+            const VoEWidget = () => {
+                const allKeywords = teamStats.reduce((acc, team) => { if (team.keywords && Array.isArray(team.keywords)) team.keywords.forEach(k => { acc[k] = (acc[k] || 0) + 1; }); return acc; }, {});
+                const keywords = Object.entries(allKeywords).map(([text, count]) => ({ text, count })).sort((a,b) => b.count - a.count);
+                return (<div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100 h-full"><h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Icon name="message-circle" size={20} className="text-purple-500" /> 구성원의 목소리 (VoE)</h3><div className="flex flex-wrap gap-2 content-start h-40 overflow-y-auto">{keywords.length === 0 ? <p className="text-sm text-slate-400 w-full text-center mt-10">등록된 키워드가 없습니다.</p> : keywords.map((k, i) => <span key={i} className="px-3 py-1.5 rounded-full text-sm font-medium border border-slate-200 bg-slate-50 text-slate-600">{k.text} <span className="text-xs opacity-50 ml-1">{k.count}</span></span>)}</div></div>);
+            };
+
+            return (
+                <div className="space-y-6 fade-in">
+                    <div className="bg-blue-50 border border-blue-100 p-3 rounded-lg text-sm text-blue-800 flex items-center gap-2 mb-4"><Icon name="calendar" size={16} /> 현재 조회 중인 데이터: <span className="font-bold">{currentPeriod}</span></div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6"><KPICard metric={{...globalMetrics.enps, icon: "users", color: "text-blue-600 bg-blue-50"}} /><KPICard metric={{...globalMetrics.safety, icon: "shield-check", color: "text-green-600 bg-green-50"}} /><KPICard metric={{...globalMetrics.burnout, icon: "flame", color: "text-red-600 bg-red-50", unit: "%"}} /><KPICard metric={{...globalMetrics.growth, icon: "trending-up", color: "text-purple-600 bg-purple-50", unit: "%"}} /></div>
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6"><div className="lg:col-span-2 bg-white rounded-xl shadow-sm border border-slate-100 p-6"><h3 className="font-bold text-slate-800 mb-6 flex items-center gap-2"><Icon name="bar-chart-2" size={20} className="text-slate-400" /> 팀별 리스크 히트맵 ({currentPeriod})</h3><div className="overflow-x-auto"><table className="w-full text-sm text-left"><thead className="bg-slate-50"><tr><th className="p-3">팀명</th><th className="p-3">업무 로드</th><th className="p-3">관계 갈등</th><th className="p-3">리더십</th><th className="p-3">상태</th></tr></thead><tbody>{teamStats.map(t => (<tr key={t.id} className="border-b"><td className="p-3">{t.name}</td><td className="p-3"><Badge type={t.workload === '과부하' ? 'critical' : 'neutral'} text={t.workload} /></td><td className="p-3"><Badge type={t.conflict === '높음' ? 'warning' : 'neutral'} text={t.conflict} /></td><td className="p-3 text-slate-500">{t.leadership}</td><td className="p-3"><span className={`w-2 h-2 rounded-full inline-block mr-2 ${t.status === '위험' ? 'bg-red-500' : 'bg-green-500'}`}></span>{t.status}</td></tr>))}</tbody></table></div></div><div className="lg:col-span-1 h-full"><ActionBoardWidget user={user} /></div></div>
+                    <div className="h-64"><TrendChart data={chartData.trend} /></div>
+                </div>
+            );
+        };
+
+        const ReportView = ({ globalMetrics, teamStats }) => {
+            const handlePrint = () => window.print();
+            const riskyTeams = teamStats.filter(t => t.status === '위험' || t.status === '심각');
+            return (
+                <div className="max-w-4xl mx-auto bg-white shadow-lg p-10 min-h-screen fade-in print:shadow-none print:p-0">
+                    <div className="flex justify-between items-center mb-10 no-print">
+                        <h2 className="text-lg font-bold text-slate-500">보고서 미리보기</h2>
+                        <button onClick={handlePrint} className="bg-slate-800 text-white px-4 py-2 rounded-lg font-bold flex items-center gap-2 hover:bg-slate-900">
+                            <Icon name="printer" size={16} /> PDF 저장 / 인쇄
+                        </button>
+                    </div>
+                    <div className="border-b-2 border-slate-800 pb-4 mb-8">
+                        <div><h1 className="text-3xl font-bold text-slate-900">월간 조직 건강도 보고서 (Monthly HR Health)</h1><p className="text-slate-500 mt-2">{new Date().toLocaleDateString()}</p></div>
+                    </div>
+                    <div className="grid grid-cols-4 gap-4 bg-slate-50 p-6 rounded-xl border border-slate-200 mb-8">
+                        <div className="text-center border-r"><div className="text-xs text-slate-500">eNPS</div><div className="text-2xl font-bold text-blue-600">{globalMetrics.enps?.value}</div></div>
+                        <div className="text-center border-r"><div className="text-xs text-slate-500">안전감</div><div className="text-2xl font-bold text-green-600">{globalMetrics.safety?.value}</div></div>
+                        <div className="text-center border-r"><div className="text-xs text-slate-500">번아웃</div><div className="text-2xl font-bold text-red-600">{globalMetrics.burnout?.value}</div></div>
+                        <div className="text-center"><div className="text-xs text-slate-500">성장</div><div className="text-2xl font-bold text-purple-600">{globalMetrics.growth?.value}</div></div>
+                    </div>
+                    <div className="space-y-6">
+                        <h3 className="text-xl font-bold border-l-4 border-red-500 pl-3">리스크 진단 (Risk Assessment)</h3>
+                        <table className="w-full text-sm text-left border-collapse border border-slate-300">
+                            <thead className="bg-slate-100"><tr><th className="border p-2">부서명</th><th className="border p-2">상태</th><th className="border p-2">이슈</th></tr></thead>
+                            <tbody>
+                                {riskyTeams.length > 0 ? riskyTeams.map(t => (
+                                    <tr key={t.id}><td className="border p-2 font-bold">{t.name}</td><td className="border p-2 text-red-600">{t.status}</td><td className="border p-2">{t.workload === '과부하' ? '업무 과다' : '관계 갈등'}</td></tr>
+                                )) : <tr><td colSpan="3" className="border p-4 text-center">리스크 없음</td></tr>}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- REAL AI Plan Generation Modal with Mock Fallback ---
+        const SolutionGeneratorModal = ({ solution, onClose }) => {
+            const [step, setStep] = useState('initializing'); 
+            const [aiPlan, setAiPlan] = useState(null);
+            const [errorMessage, setErrorMessage] = useState("");
+            const [usedModel, setUsedModel] = useState("");
+            const [isMock, setIsMock] = useState(false);
+            
+            // Mock Data Generator
+            const generateMockPlan = (cat) => {
+                const plans = {
+                    'Resource': {
+                        steps: [
+                            {title: "직무 분석 및 병목 확인 (1주차)", desc: "팀원 개별 인터뷰를 통해 비효율 업무 식별 및 R&R 재조정"},
+                            {title: "단기 리소스 재배치 (2주차)", desc: "유관 부서 협조 요청 또는 프리랜서 활용 예산 확보"},
+                            {title: "채용 프로세스 가동 (3~6주차)", desc: "직무 기술서(JD) 업데이트 및 채용 공고 게시"}
+                        ]
+                    },
+                    'Culture': {
+                        steps: [
+                            {title: "심리적 안전감 진단 (1주차)", desc: "익명 심층 인터뷰를 통해 갈등의 근본 원인 파악"},
+                            {title: "관계 해소 워크숍 (2주차)", desc: "외부 퍼실리테이터 초빙, '솔직한 대화' 세션 운영"},
+                            {title: "그라운드 룰 재정립 (3주차)", desc: "팀 내 소통 방식 및 피드백 규칙 합의"}
+                        ]
+                    },
+                    'Growth': {
+                        steps: [
+                            {title: "개인별 커리어 골 설정 (1주차)", desc: "구성원별 성장 욕구 파악 및 IDP(개인개발계획) 수립"},
+                            {title: "사내 멘토링 매칭 (2주차)", desc: "시니어 리더와 주니어 간의 1:1 매칭 지원"},
+                            {title: "월간 성장 리뷰 (지속)", desc: "매월 마지막 주 금요일, 성과가 아닌 '성장' 중심의 리뷰 진행"}
+                        ]
+                    }
+                };
+                return plans[cat] || plans['Growth'];
+            };
+
+            useEffect(() => {
+                const runProcess = async () => {
+                    try {
+                        setStep('initializing');
+                        let targetModel = "gemini-1.5-flash"; 
+                        let apiVersion = "v1beta";      
+
+                        // Try 1: 1.5-flash
+                        try {
+                            const genUrl = `https://generativelanguage.googleapis.com/${apiVersion}/models/${targetModel}:generateContent?key=${GEMINI_API_KEY}`;
+                            
+                            const prompt = `
+                                You are a top-tier HR consultant.
+                                The team has a specific issue:
+                                - Category: ${solution.category}
+                                - Issue Title: ${solution.title}
+                                - Description: ${solution.desc}
+                                
+                                Please provide a very concrete, actionable 3-step solution plan.
+                                Return ONLY a valid JSON object:
+                                {
+                                  "steps": [
+                                    {"title": "Step 1 Title", "desc": "Desc"},
+                                    {"title": "Step 2 Title", "desc": "Desc"},
+                                    {"title": "Step 3 Title", "desc": "Desc"}
+                                  ]
+                                }
+                                Respond in Korean.
+                            `;
+
+                            const response = await fetch(genUrl, {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+                            });
+
+                            const data = await response.json();
+
+                            if (data.error) throw new Error(data.error.message);
+                            
+                            if (data.candidates && data.candidates[0].content) {
+                                const rawText = data.candidates[0].content.parts[0].text;
+                                const jsonText = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
+                                const parsedPlan = JSON.parse(jsonText);
+                                setAiPlan(parsedPlan);
+                                setUsedModel(targetModel);
+                                setStep('content');
+                                return;
+                            } else {
+                                throw new Error("No output");
+                            }
+
+                        } catch (e) {
+                            console.warn("Flash model failed, trying fallback...", e);
+                            // Only console log, proceed to fallback logic
+                        }
+
+                        // Fallback: Use Mock Data (Simulation Mode)
+                        console.log("Switching to Simulation Mode");
+                        await new Promise(r => setTimeout(r, 1500)); // Fake loading
+                        setAiPlan(generateMockPlan(solution.category));
+                        setUsedModel("Simulation Mode (Quota Exceeded)");
+                        setIsMock(true);
+                        setStep('content');
+
+                    } catch (e) {
+                        console.error("Fatal Error:", e);
+                        // Even in fatal error, try mock
+                        setAiPlan(generateMockPlan(solution.category));
+                        setUsedModel("Simulation Mode (Error Fallback)");
+                        setIsMock(true);
+                        setStep('content');
+                    }
+                };
+
+                runProcess();
+            }, [solution]);
+
+            const savePlan = async () => {
+                if(!aiPlan) return;
+                try {
+                    for (const step of aiPlan.steps) {
+                        await window.firestore.addDoc(window.firestore.collection(window.db, 'artifacts', APP_ID, 'public', 'data', 'action_items'), { 
+                            text: `[AI 제안] ${step.title}: ${step.desc}`, 
+                            completed: false, 
+                            createdAt: window.firestore.serverTimestamp(),
+                            createdBy: isMock ? 'AI_SIMULATOR' : 'AI_AGENT'
+                        });
+                    }
+                    alert("AI가 제안한 실행 계획이 실행 과제 목록에 추가되었습니다.");
+                    onClose();
+                } catch(e) {
+                    console.error("Save error", e);
+                    alert("저장 실패");
+                }
+            };
+
+            return (
+                <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-[100] p-4 fade-in backdrop-blur-sm">
+                    <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full p-6 border border-slate-200 relative">
+                        <button onClick={onClose} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600"><Icon name="x" size={20}/></button>
+                        
+                        <div className="mb-6 flex items-center gap-3">
+                            <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-purple-600 rounded-lg flex items-center justify-center text-white">
+                                <Icon name="sparkles" size={20} />
+                            </div>
+                            <div>
+                                <h3 className="font-bold text-lg text-slate-800">AI 맞춤형 솔루션 생성</h3>
+                                <p className="text-xs text-slate-500">Google Gemini 엔진 기반</p>
+                            </div>
+                        </div>
+
+                        {step === 'initializing' && (
+                            <div className="py-12 text-center">
+                                <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-slate-400 mx-auto mb-4"></div>
+                                <p className="text-slate-600 font-medium">최적의 AI 모델 탐색 중...</p>
+                            </div>
+                        )}
+
+                        {step === 'loading' && (
+                            <div className="py-12 text-center">
+                                <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600 mx-auto mb-4"></div>
+                                <p className="text-slate-600 font-medium animate-pulse">조직 데이터를 분석하여 최적의 실행 계획을 생성 중입니다...</p>
+                            </div>
+                        )}
+
+                        {step === 'content' && aiPlan && (
+                            <div className="animate-fade-in">
+                                <div className="mb-4">
+                                    <h4 className="text-sm font-bold text-slate-700 mb-1">제안 배경</h4>
+                                    <p className="text-sm text-slate-600 bg-slate-50 p-3 rounded">{solution.desc}</p>
+                                </div>
+                                <h4 className="text-sm font-bold text-slate-700 mb-3">🚀 AI가 제안하는 3단계 실행 계획</h4>
+                                <div className="space-y-4">
+                                    {aiPlan.steps.map((s, i) => (
+                                        <div key={i} className="p-3 bg-blue-50/50 rounded border border-blue-100">
+                                            <h4 className="font-bold text-blue-800 text-sm">{s.title}</h4>
+                                            <p className="text-xs text-slate-700 mt-1">{s.desc}</p>
+                                        </div>
+                                    ))}
+                                </div>
+                                <div className="mt-6 flex justify-end gap-2">
+                                    <button onClick={onClose} className="px-4 py-2 text-slate-500 hover:bg-slate-50 rounded text-sm">닫기</button>
+                                    <button onClick={savePlan} className="px-4 py-2 bg-blue-600 text-white rounded text-sm font-bold hover:bg-blue-700 shadow-md">실행 계획 저장</button>
+                                </div>
+                                <p className="text-[10px] text-slate-400 mt-2 text-right">
+                                    {isMock && "⚠️ API 한도 초과로 시뮬레이션 모드로 전환되었습니다."} 
+                                    생성 모델: {usedModel}
+                                </p>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        const AnalysisView = ({ teamStats, globalMetrics }) => {
+            const [selectedSolution, setSelectedSolution] = useState(null);
+
+            // Filter risky teams
+            const riskyTeams = teamStats.filter(t => t.status === '위험' || t.status === '심각');
+            const highWorkloadTeams = teamStats.filter(t => t.workload === '과부하');
+            const conflictTeams = teamStats.filter(t => t.conflict === '높음');
+
+            // Generate Recommendations
+            const recommendations = [];
+            if (highWorkloadTeams.length > 0) {
+                recommendations.push({
+                    type: 'urgent',
+                    category: 'Resource',
+                    title: '인력 재배치 및 채용 검토 필요',
+                    desc: `${highWorkloadTeams.map(t=>t.name).join(', ')} 팀의 업무 과부하가 지속되고 있습니다. 단기적으로는 R&R 재조정, 장기적으로는 인력 충원이 시급합니다.`,
+                    action: '직무 분석 실행'
+                });
+            }
+            if (conflictTeams.length > 0) {
+                recommendations.push({
+                    type: 'warning',
+                    category: 'Culture',
+                    title: '관계 갈등 해소 워크숍',
+                    desc: `${conflictTeams.map(t=>t.name).join(', ')} 팀 내 소통 이슈가 감지되었습니다. 심리적 안전감을 높이기 위한 퍼실리테이팅이 필요합니다.`,
+                    action: '1on1 미팅 강화'
+                });
+            }
+            if (recommendations.length === 0) {
+                recommendations.push({
+                    type: 'good',
+                    category: 'Growth',
+                    title: '성장 모멘텀 강화',
+                    desc: '전반적인 조직 건강도가 양호합니다. 현재의 긍정적 문화를 유지하면서, 구성원의 커리어 성장을 지원하는 멘토링 프로그램을 도입해보세요.',
+                    action: '멘토링 프로그램 기획'
+                });
+            }
+
+            return (
+                <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-6 fade-in h-full overflow-y-auto">
+                    <h2 className="text-xl font-bold text-slate-800 mb-6 flex items-center gap-2">
+                        <Icon name="microscope" className="text-blue-600"/> 조직 심층 분석 및 개선 제언
+                    </h2>
+                    
+                    {/* 1. Key Issues Summary */}
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                        <div className="bg-red-50 p-5 rounded-xl border border-red-100">
+                            <h3 className="text-red-800 font-bold mb-2 flex items-center gap-2"><Icon name="siren" size={18}/> 긴급 관리 필요</h3>
+                            <p className="text-3xl font-bold text-red-600">{riskyTeams.length}<span className="text-sm font-normal text-red-400 ml-1">개 팀</span></p>
+                            <p className="text-xs text-red-500 mt-2">즉각적인 개입이 필요한 고위험 그룹</p>
+                        </div>
+                        <div className="bg-orange-50 p-5 rounded-xl border border-orange-100">
+                            <h3 className="text-orange-800 font-bold mb-2 flex items-center gap-2"><Icon name="activity" size={18}/> 번아웃 경보</h3>
+                            <p className="text-3xl font-bold text-orange-600">{globalMetrics.burnout?.value || '0%'}</p>
+                            <p className="text-xs text-orange-500 mt-2">전사 평균 번아웃 리스크 지수</p>
+                        </div>
+                        <div className="bg-blue-50 p-5 rounded-xl border border-blue-100">
+                            <h3 className="text-blue-800 font-bold mb-2 flex items-center gap-2"><Icon name="smile" size={18}/> 긍정 응답률</h3>
+                            <p className="text-3xl font-bold text-blue-600">{(Number(globalMetrics.safety?.value || 0) * 20).toFixed(0)}%</p>
+                            <p className="text-xs text-blue-500 mt-2">심리적 안전감 환산 점수</p>
+                        </div>
+                    </div>
+
+                    {/* 2. Priority Matrix & Action Plans */}
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                        <div>
+                            <h3 className="font-bold text-slate-700 mb-4 text-lg">⚠️ 주요 이슈 (Priority Issues)</h3>
+                            {riskyTeams.length === 0 ? (
+                                <div className="bg-green-50 p-6 rounded-xl border border-green-100 text-center">
+                                    <Icon name="check-circle" size={40} className="text-green-500 mx-auto mb-3" />
+                                    <p className="text-green-800 font-bold">발견된 위험 요소가 없습니다.</p>
+                                    <p className="text-green-600 text-sm">모든 팀이 안정적인 상태를 유지하고 있습니다.</p>
+                                </div>
+                            ) : (
+                                <div className="space-y-3">
+                                    {riskyTeams.map(t => (
+                                        <div key={t.id} className="flex items-center justify-between p-4 bg-white border border-slate-200 rounded-lg shadow-sm hover:shadow-md transition-shadow">
+                                            <div>
+                                                <span className="font-bold text-slate-800">{t.name}</span>
+                                                <div className="flex gap-2 mt-1">
+                                                    {t.workload === '과부하' && <span className="text-xs bg-red-100 text-red-600 px-2 py-0.5 rounded">업무 과다</span>}
+                                                    {(t.conflict === '높음' || t.status === '위험') && <span className="text-xs bg-orange-100 text-orange-600 px-2 py-0.5 rounded">집중 케어 필요</span>}
+                                                </div>
+                                            </div>
+                                            <button className="text-sm bg-slate-800 text-white px-3 py-1.5 rounded hover:bg-slate-700">면담 예약</button>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+
+                        <div>
+                            <h3 className="font-bold text-slate-700 mb-4 text-lg">💡 맞춤형 개선 솔루션 (Solutions)</h3>
+                            <div className="space-y-4">
+                                {recommendations.map((rec, idx) => (
+                                    <div key={idx} className="bg-white border border-slate-200 p-5 rounded-xl shadow-sm relative overflow-hidden">
+                                        <div className={`absolute top-0 left-0 w-1 h-full ${rec.type === 'urgent' ? 'bg-red-500' : rec.type === 'warning' ? 'bg-orange-500' : 'bg-green-500'}`}></div>
+                                        <div className="flex justify-between items-start mb-2">
+                                            <span className={`text-xs font-bold px-2 py-1 rounded uppercase ${rec.type === 'urgent' ? 'bg-red-100 text-red-700' : rec.type === 'warning' ? 'bg-orange-100 text-orange-700' : 'bg-green-100 text-green-700'}`}>
+                                                {rec.category}
+                                            </span>
+                                        </div>
+                                        <h4 className="font-bold text-slate-900 text-md mb-1">{rec.title}</h4>
+                                        <p className="text-sm text-slate-600 mb-4 leading-relaxed">{rec.desc}</p>
+                                        <button 
+                                            onClick={() => setSelectedSolution(rec)}
+                                            className="w-full py-2 border border-slate-300 rounded-lg text-sm font-bold text-slate-700 hover:bg-slate-50 flex items-center justify-center gap-2"
+                                        >
+                                            <Icon name="check-square" size={16}/> {rec.action} 계획 수립
+                                        </button>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+
+                    {selectedSolution && (
+                        <SolutionGeneratorModal 
+                            solution={selectedSolution} 
+                            onClose={() => setSelectedSolution(null)} 
+                        />
+                    )}
+                </div>
+            );
+        };
+
+        const DataManagementView = ({ teamStats, currentPeriod }) => {
+            const [responses, setResponses] = useState([]);
+            const [loading, setLoading] = useState(true);
+
+            useEffect(() => {
+                if(!window.db) return;
+                setLoading(true);
+                // Modified: removed where clause to avoid index issues, doing client-side filtering
+                const q = window.firestore.query(
+                    window.firestore.collection(window.db, 'artifacts', APP_ID, 'public', 'data', 'survey_responses')
+                );
+
+                const unsubscribe = window.firestore.onSnapshot(q, (snapshot) => {
+                    const data = snapshot.docs
+                        .map(doc => {
+                            const rawData = doc.data();
+                            const team = teamStats.find(t => t.id === rawData.teamId);
+                            return {
+                                id: doc.id,
+                                ...rawData,
+                                teamName: team ? team.name : 'Unknown Team',
+                                date: rawData.createdAt ? new Date(rawData.createdAt.seconds * 1000).toLocaleString() : 'N/A',
+                                createdAtSeconds: rawData.createdAt ? rawData.createdAt.seconds : 0
+                            };
+                        })
+                        // Client-side filtering for period
+                        .filter(item => item.period === currentPeriod);
+                    
+                    // Sort locally
+                    data.sort((a, b) => b.createdAtSeconds - a.createdAtSeconds);
+                    
+                    setResponses(data);
+                    setLoading(false);
+                }, (error) => {
+                    console.error("Error fetching responses:", error);
+                    setLoading(false);
+                });
+
+                return () => unsubscribe();
+            }, [currentPeriod, teamStats]);
+
+            const handleDelete = async (id) => {
+                if(!confirm("이 데이터를 영구적으로 삭제하시겠습니까?")) return;
+                await window.firestore.deleteDoc(window.firestore.doc(window.db, 'artifacts', APP_ID, 'public', 'data', 'survey_responses', id));
+                // Auto calc on delete
+                await calculatePeriodStats(window.db, currentPeriod, teamStats, true); 
+            };
+
+            return (
+                <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-6 fade-in h-full flex flex-col">
+                    <div className="flex justify-between items-center mb-6">
+                        <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">
+                            <Icon name="database" className="text-blue-600"/> 데이터 관리 (Data Management)
+                        </h2>
+                        <span className="text-sm text-slate-500">
+                            기간: <span className="font-bold text-slate-800">{currentPeriod}</span> | 총 <span className="font-bold text-blue-600">{responses.length}</span>건
+                        </span>
+                    </div>
+
+                    <div className="flex-1 overflow-auto border rounded-lg">
+                        <table className="w-full text-sm text-left">
+                            <thead className="bg-slate-50 sticky top-0 z-10 text-slate-700 uppercase text-xs">
+                                <tr>
+                                    <th className="p-3 border-b">일시</th>
+                                    <th className="p-3 border-b">팀명</th>
+                                    <th className="p-3 border-b text-center">업무</th>
+                                    <th className="p-3 border-b text-center">관계</th>
+                                    <th className="p-3 border-b text-center">리더</th>
+                                    <th className="p-3 border-b">키워드 (Voice)</th>
+                                    <th className="p-3 border-b text-center">관리</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100">
+                                {loading ? (
+                                    <tr><td colSpan="7" className="p-8 text-center text-slate-500">데이터를 불러오는 중...</td></tr>
+                                ) : responses.length === 0 ? (
+                                    <tr><td colSpan="7" className="p-8 text-center text-slate-500">해당 기간에 등록된 데이터가 없습니다.</td></tr>
+                                ) : (
+                                    responses.map(res => (
+                                        <tr key={res.id} className="hover:bg-slate-50 transition-colors">
+                                            <td className="p-3 text-slate-500 text-xs whitespace-nowrap">{res.date}</td>
+                                            <td className="p-3 font-medium text-slate-800 whitespace-nowrap">{res.teamName}</td>
+                                            <td className="p-3 text-center"><span className="bg-slate-100 px-2 py-1 rounded text-xs font-bold">{res.workload}</span></td>
+                                            <td className="p-3 text-center"><span className="bg-slate-100 px-2 py-1 rounded text-xs font-bold">{res.relationship}</span></td>
+                                            <td className="p-3 text-center"><span className="bg-slate-100 px-2 py-1 rounded text-xs font-bold">{res.leadership}</span></td>
+                                            <td className="p-3 text-slate-600 text-xs italic max-w-xs truncate" title={res.keywords}>{res.keywords || '-'}</td>
+                                            <td className="p-3 text-center">
+                                                <button onClick={() => handleDelete(res.id)} className="text-slate-400 hover:text-red-600 transition-colors p-1" title="삭제">
+                                                    <Icon name="trash-2" size={14}/>
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    ))
+                                )}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            );
+        };
+
+        const TeamManagementView = ({ teamStats, currentPeriod }) => {
+            const [formData, setFormData] = useState({ name: '', workload: '적정', conflict: '낮음', leadership: '보통', status: '양호', keywords: [] });
+            const [isEditing, setIsEditing] = useState(null);
+            
+            const handleSave = async (e) => { 
+                e.preventDefault(); 
+                const { collection, addDoc, doc, updateDoc, serverTimestamp } = window.firestore; 
+                const data = { ...formData, period: currentPeriod, createdAt: serverTimestamp() }; 
+                if (isEditing) await updateDoc(doc(window.db, 'artifacts', APP_ID, 'public', 'data', 'team_stats', isEditing), formData); 
+                else await addDoc(collection(window.db, 'artifacts', APP_ID, 'public', 'data', 'team_stats'), data); 
+                setFormData({ name: '', workload: '적정', conflict: '낮음', leadership: '보통', status: '양호', keywords: [] }); 
+                setIsEditing(null); 
+            };
+            const handleDelete = async (id) => window.firestore.deleteDoc(window.firestore.doc(window.db, 'artifacts', APP_ID, 'public', 'data', 'team_stats', id));
+            
+            return (
+                <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-6 fade-in">
+                    <h2 className="text-lg font-bold text-slate-800 mb-2">팀 데이터 관리</h2>
+                    <p className="text-sm text-blue-600 mb-4 font-medium">현재 선택된 기간: {currentPeriod} 에 데이터를 추가합니다.</p>
+                    <form onSubmit={handleSave} className="grid grid-cols-1 md:grid-cols-6 gap-3 mb-6 bg-slate-50 p-4 rounded-lg"><input placeholder="팀명" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className="md:col-span-2 border p-2 rounded text-sm" required /><select value={formData.workload} onChange={e => setFormData({...formData, workload: e.target.value})} className="border p-2 rounded text-sm"><option value="적정">업무: 적정</option><option value="과부하">업무: 과부하</option></select><select value={formData.status} onChange={e => setFormData({...formData, status: e.target.value})} className="border p-2 rounded text-sm"><option value="양호">상태: 양호</option><option value="위험">상태: 위험</option></select><button className="bg-blue-600 text-white md:col-span-1 rounded font-bold text-sm">저장</button></form>
+                    <div className="overflow-x-auto"><table className="w-full text-sm text-left"><thead className="bg-slate-50"><tr><th className="p-3">팀명</th><th className="p-3">상태</th><th className="p-3">키워드(VoE)</th><th className="p-3">관리</th></tr></thead><tbody>{teamStats.map(t => (<tr key={t.id} className="border-b"><td className="p-3">{t.name}</td><td className="p-3"><Badge type={t.status === '위험' ? 'critical' : 'good'} text={t.status} /></td><td className="p-3 text-xs text-slate-500">{t.keywords ? t.keywords.join(", ") : "-"}</td><td className="p-3"><button onClick={() => handleDelete(t.id)} className="text-red-500 text-xs">삭제</button></td></tr>))}</tbody></table></div>
+                </div>
+            );
+        };
+
+        const SettingsView = ({ globalMetrics, chartData, availableYears, setAvailableYears, currentPeriod, teamStats }) => {
+            const [form, setForm] = useState(globalMetrics);
+            const [newYear, setNewYear] = useState("");
+            const [resetConfirm, setResetConfirm] = useState(false);
+
+            useEffect(() => setForm(globalMetrics), [globalMetrics]);
+
+            const handleMetricChange = (key, field, val) => {
+                setForm(prev => ({ ...prev, [key]: { ...prev[key], [field]: val } }));
+            };
+
+            const save = async () => {
+                 await window.firestore.setDoc(window.firestore.doc(window.db, 'artifacts', APP_ID, 'public', 'data', 'global_stats', currentPeriod), form);
+                 alert("저장되었습니다.");
+            };
+
+            const addYear = () => {
+                if(newYear && !availableYears.includes(newYear)) setAvailableYears([...availableYears, newYear].sort());
+                setNewYear("");
+            };
+
+            const resetPeriodData = async () => {
+                if(!resetConfirm) {
+                    setResetConfirm(true);
+                    setTimeout(() => setResetConfirm(false), 3000);
+                    return;
+                }
+                
+                try {
+                    await window.firestore.deleteDoc(window.firestore.doc(window.db, 'artifacts', APP_ID, 'public', 'data', 'global_stats', currentPeriod));
+                    const updatedTrend = chartData.trend.filter(t => t.label !== currentPeriod);
+                    await window.firestore.updateDoc(window.firestore.doc(window.db, 'artifacts', APP_ID, 'public', 'data', 'chart_stats', 'current'), {
+                        trend: updatedTrend
+                    });
+                    setResetConfirm(false);
+                    alert(`현재 기간(${currentPeriod})의 모든 데이터가 초기화되었습니다.`);
+                } catch (e) {
+                    console.error(e);
+                    alert("초기화 실패");
+                }
+            };
+
+            const handleManualRefresh = async () => {
+                await calculatePeriodStats(window.db, currentPeriod, teamStats, false);
+            };
+
+            const clearChartData = async () => {
+                if(!confirm("모든 차트 데이터를 삭제하시겠습니까?")) return;
+                await window.firestore.setDoc(window.firestore.doc(window.db, 'artifacts', APP_ID, 'public', 'data', 'chart_stats', 'current'), { trend: [] });
+                alert("차트 데이터가 초기화되었습니다.");
+            };
+
+            return (
+                <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-6 fade-in max-w-4xl">
+                    <div className="mb-8 border-b pb-6">
+                        <h2 className="text-lg font-bold mb-4">자동화 도구</h2>
+                        <div className="flex flex-col md:flex-row gap-4">
+                            <div className="bg-blue-50 p-4 rounded-lg flex-1 flex flex-col justify-center">
+                                <div>
+                                    <h3 className="font-bold text-blue-800">데이터 수동 새로고침 ({currentPeriod})</h3>
+                                    <p className="text-xs text-blue-600 mt-1">※ 데이터 등록 시 자동으로 계산되므로, 누락 시에만 사용하세요.</p>
+                                </div>
+                                <button onClick={handleManualRefresh} className="mt-2 w-full bg-blue-600 text-white px-4 py-2 rounded-lg font-bold hover:bg-blue-700">새로고침</button>
+                            </div>
+                            
+                            <div className="bg-orange-50 p-4 rounded-lg flex-1 flex flex-col justify-center">
+                                <div><h3 className="font-bold text-orange-800">현재 데이터 초기화</h3><p className="text-xs text-orange-600 mt-1">현재 조회 중인 월의 KPI 값을 삭제합니다.</p></div>
+                                <button onClick={resetPeriodData} className={`mt-2 w-full text-white px-4 py-2 rounded-lg font-bold transition-colors ${resetConfirm ? 'bg-red-600' : 'bg-orange-500 hover:bg-orange-600'}`}>
+                                    {resetConfirm ? "확실합니까? (클릭)" : "초기화"}
+                                </button>
+                            </div>
+
+                            <div className="bg-red-50 p-4 rounded-lg flex-1 flex flex-col justify-center">
+                                <div><h3 className="font-bold text-red-800">차트 기록 전체 삭제</h3><p className="text-xs text-red-600 mt-1">저장된 eNPS 추이를 모두 삭제합니다.</p></div>
+                                <button onClick={clearChartData} className="mt-2 w-full bg-red-600 text-white px-4 py-2 rounded-lg font-bold hover:bg-red-700">전체 삭제</button>
+                            </div>
+                        </div>
+                    </div>
+                    <h2 className="text-lg font-bold mb-6">KPI 수동 보정 ({currentPeriod})</h2>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+                        {Object.entries(form).map(([key, data]) => (
+                            <div key={key} className="bg-slate-50 p-4 rounded-lg border border-slate-200">
+                                <h3 className="text-sm font-bold text-slate-700 mb-3 uppercase">{data.label}</h3>
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div><label className="text-xs text-slate-500">값</label><input value={data.value} onChange={e => handleMetricChange(key, 'value', e.target.value)} className="w-full border p-2 rounded text-sm" /></div>
+                                    <div><label className="text-xs text-slate-500">변화량</label><input value={data.diff} onChange={e => handleMetricChange(key, 'diff', e.target.value)} className="w-full border p-2 rounded text-sm" /></div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                    <button onClick={save} className="bg-slate-800 text-white px-6 py-3 rounded-lg font-bold">저장</button>
+                    <div className="mt-10 border-t pt-6">
+                        <h2 className="text-lg font-bold mb-4">연도 설정</h2>
+                        <div className="flex gap-2"><input value={newYear} onChange={e => setNewYear(e.target.value)} placeholder="예: 2028" className="border p-2 rounded w-32" /><button onClick={addYear} className="bg-green-600 text-white px-4 py-2 rounded font-bold">추가</button></div>
+                    </div>
+                </div>
+            );
+        };
+
+        const Sidebar = ({ currentView, setView, role, isMobileMenuOpen, setIsMobileMenuOpen }) => {
+            const adminMenu = [
+                { id: 'dashboard', label: '대시보드', icon: 'layout-dashboard' }, 
+                { id: 'teams', label: '팀/조직 관리', icon: 'users' }, 
+                { id: 'analysis', label: '분석 및 개선', icon: 'lightbulb' },
+                { id: 'data', label: '데이터 관리', icon: 'database' }, 
+                { id: 'report', label: '리포트 생성', icon: 'file-text' }, 
+                { id: 'settings', label: '설정', icon: 'settings' }
+            ];
+            const empMenu = [{ id: 'survey', label: '조직 진단 (서베이)', icon: 'clipboard-list' }];
+            const menu = role === 'admin' ? adminMenu : empMenu;
+            
+            return (
+                <>
+                    {/* Mobile Overlay */}
+                    {isMobileMenuOpen && (
+                        <div 
+                            className="fixed inset-0 bg-black bg-opacity-50 z-40 md:hidden"
+                            onClick={() => setIsMobileMenuOpen(false)}
+                        ></div>
+                    )}
+                    
+                    {/* Sidebar Drawer */}
+                    <aside className={`
+                        fixed top-0 left-0 bottom-0 z-50 w-64 bg-white border-r border-slate-200 flex flex-col h-full 
+                        transform transition-transform duration-300 ease-in-out
+                        ${isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full'} 
+                        md:translate-x-0 no-print
+                    `}>
+                        <div className="h-16 flex items-center px-6 border-b border-slate-100 justify-between">
+                            <span className="font-bold text-lg text-slate-800">OrgPulse</span>
+                            <button onClick={() => setIsMobileMenuOpen(false)} className="md:hidden text-slate-500">
+                                <Icon name="x" size={24} />
+                            </button>
+                        </div>
+                        <nav className="flex-1 p-4 space-y-1">
+                            {menu.map(item => (
+                                <button key={item.id} onClick={() => { setView(item.id); setIsMobileMenuOpen(false); }} className={`sidebar-item w-full flex items-center gap-3 px-4 py-3 text-sm font-medium rounded-lg ${currentView === item.id ? 'active' : 'text-slate-600 hover:bg-slate-50'}`}>
+                                    <Icon name={item.icon} size={20} />
+                                    {item.label}
+                                </button>
+                            ))}
+                        </nav>
+                        <div className="p-4 border-t border-slate-100">
+                            <div className={`p-3 rounded-lg border flex items-center gap-2 mb-2 ${role === 'admin' ? 'bg-slate-800 text-white' : 'bg-green-50 text-green-700 border-green-200'}`}>
+                                <span className="text-xs font-bold">{role === 'admin' ? '관리자 모드' : '구성원 모드'}</span>
+                            </div>
+                            <div className="flex items-center gap-2 text-xs text-slate-500 px-1"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div><span>시스템 연동됨</span></div>
+                        </div>
+                    </aside>
+                </>
+            );
+        };
+
+        const App = () => {
+            const [user, setUser] = useState(null);
+            const [role, setRole] = useState('employee'); 
+            const [currentView, setCurrentView] = useState('survey');
+            const [showAdminLogin, setShowAdminLogin] = useState(false);
+            const [selectedYear, setSelectedYear] = useState("2026");
+            const [selectedMonth, setSelectedMonth] = useState("2");
+            const [availableYears, setAvailableYears] = useState(["2026", "2027"]);
+            const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+            
+            const currentPeriod = useMemo(() => getFormattedPeriod(selectedYear, selectedMonth), [selectedYear, selectedMonth]);
+
+            const defaultMetrics = {
+                enps: { label: "몰입도 (eNPS)", value: "-", diff: "0" },
+                safety: { label: "심리적 안전감", value: "-", diff: "0" },
+                burnout: { label: "번아웃 리스크", value: "-", diff: "0" },
+                growth: { label: "성장 비전 공감", value: "-", diff: "0" }
+            };
+            const [globalMetrics, setGlobalMetrics] = useState(defaultMetrics);
+            const [chartData, setChartData] = useState({ trend: [] });
+            const [teamStats, setTeamStats] = useState([]);
+
+            useEffect(() => {
+                const initAuth = async () => {
+                    if (!window.firebaseAuth) return;
+                    window.firebaseAuth.onAuthStateChanged(window.auth, (u) => {
+                        if (u) { setUser(u); } 
+                        else { window.firebaseAuth.signInAnonymously(window.auth).catch(console.error); }
+                    });
+                };
+                initAuth();
+            }, []);
+
+            useEffect(() => { 
+                if(role === 'employee') setCurrentView('survey');
+                else if(role === 'admin' && currentView === 'survey') setCurrentView('dashboard');
+            }, [role, currentView]);
+
+            useEffect(() => {
+                if (!window.db) return;
+                const metricsRef = window.firestore.doc(window.db, 'artifacts', APP_ID, 'public', 'data', 'global_stats', currentPeriod);
+                const unsubMetrics = window.firestore.onSnapshot(metricsRef, (s) => {
+                    if (s.exists()) setGlobalMetrics(s.data());
+                    else setGlobalMetrics(defaultMetrics); 
+                });
+                const teamQ = window.firestore.query(
+                    window.firestore.collection(window.db, 'artifacts', APP_ID, 'public', 'data', 'team_stats'),
+                    window.firestore.where("period", "==", currentPeriod)
+                );
+                const unsubTeams = window.firestore.onSnapshot(teamQ, (s) => {
+                    const teams = s.docs.map(d => ({ id: d.id, ...d.data() }));
+                    teams.sort((a, b) => a.name.localeCompare(b.name, 'ko'));
+                    setTeamStats(teams);
+                });
+                const chartRef = window.firestore.doc(window.db, 'artifacts', APP_ID, 'public', 'data', 'chart_stats', 'current');
+                const unsubChart = window.firestore.onSnapshot(chartRef, (s) => {
+                    if (s.exists()) setChartData(s.data());
+                    else window.firestore.setDoc(chartRef, { trend: [] }); 
+                });
+                return () => { unsubMetrics(); unsubTeams(); unsubChart(); };
+            }, [currentPeriod, user]);
+            
+            const handleAdminSuccess = () => { setRole('admin'); };
+
+            if (!user) return <Loading />;
+
+            return (
+                <div className="flex min-h-screen bg-[#f8fafc]">
+                    <Sidebar 
+                        currentView={currentView} 
+                        setView={setCurrentView} 
+                        role={role} 
+                        isMobileMenuOpen={isMobileMenuOpen} 
+                        setIsMobileMenuOpen={setIsMobileMenuOpen}
+                    />
+                    <main className="flex-1 md:ml-64 p-4 md:p-8 overflow-y-auto print:ml-0 print:p-0 transition-all duration-300">
+                        <header className="flex justify-between items-center mb-6 md:mb-8 no-print">
+                            <div className="flex items-center gap-3">
+                                {/* Mobile Menu Button */}
+                                <button onClick={() => setIsMobileMenuOpen(true)} className="md:hidden text-slate-600 p-1 rounded-md hover:bg-slate-100">
+                                    <Icon name="menu" size={24} />
+                                </button>
+                                
+                                <div>
+                                    <h1 className="text-xl md:text-2xl font-bold text-slate-900 tracking-tight">{role === 'employee' ? '환영합니다!' : 'HR 관리자 콘솔'}</h1>
+                                    {role === 'admin' && (
+                                        <div className="mt-2 flex items-center gap-2">
+                                            <p className="hidden md:block text-sm text-blue-600 font-bold">🕒 조회 기간:</p>
+                                            <select value={selectedYear} onChange={e => setSelectedYear(e.target.value)} className="text-xs p-1 rounded border border-blue-200">{availableYears.map(y => <option key={y} value={y}>{y}년</option>)}</select>
+                                            <select value={selectedMonth} onChange={e => setSelectedMonth(e.target.value)} className="text-xs p-1 rounded border border-blue-200">{Array.from({length:12}, (_,i)=>i+1).map(m => <option key={m} value={m}>{m}월</option>)}</select>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                            
+                            <div className="flex items-center gap-4">
+                                <div className="bg-white border border-slate-200 rounded-lg p-1 flex shadow-sm">
+                                    <button onClick={() => setShowAdminLogin(true)} className={`px-2 py-1.5 md:px-3 text-xs font-bold rounded-md transition ${role === 'admin' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-50'}`}>관리자</button>
+                                    <button onClick={() => setRole('employee')} className={`px-2 py-1.5 md:px-3 text-xs font-bold rounded-md transition ${role === 'employee' ? 'bg-green-600 text-white' : 'text-slate-500 hover:bg-slate-50'}`}>구성원</button>
+                                </div>
+                            </div>
+                        </header>
+                        
+                        {role === 'employee' && <SurveyView teamStats={teamStats} currentPeriod={currentPeriod} user={user} />}
+                        
+                        {role === 'admin' && currentView === 'dashboard' && <DashboardView globalMetrics={globalMetrics} chartData={chartData} teamStats={teamStats} currentPeriod={currentPeriod} user={user} />}
+                        {role === 'admin' && currentView === 'teams' && <TeamManagementView teamStats={teamStats} currentPeriod={currentPeriod} />}
+                        {role === 'admin' && currentView === 'analysis' && <AnalysisView teamStats={teamStats} globalMetrics={globalMetrics} />}
+                        {role === 'admin' && currentView === 'data' && <DataManagementView teamStats={teamStats} currentPeriod={currentPeriod} />}
+                        {role === 'admin' && currentView === 'settings' && <SettingsView globalMetrics={globalMetrics} chartData={chartData} availableYears={availableYears} setAvailableYears={setAvailableYears} currentPeriod={currentPeriod} teamStats={teamStats} />}
+                        {role === 'admin' && currentView === 'report' && <ReportView globalMetrics={globalMetrics} teamStats={teamStats} />}
+
+                        {showAdminLogin && <AdminLoginModal onClose={() => setShowAdminLogin(false)} onSuccess={handleAdminSuccess} />}
+                    </main>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
