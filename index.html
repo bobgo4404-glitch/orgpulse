@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>OrgPulse - Secure HR Platform</title>
+    <title>대나무숲</title>
     
     <!-- React & ReactDOM -->
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
@@ -63,7 +63,7 @@
         }
         input[type=range]::-webkit-slider-thumb {
             -webkit-appearance: none;
-            height: 20px;
+            height: 20px; /* Larger touch target for mobile */
             width: 20px;
             border-radius: 50%;
             background: #2563eb;
@@ -80,9 +80,11 @@
         }
         .action-item:hover .action-tools { opacity: 1; }
         .action-tools { opacity: 0; transition: opacity 0.2s; }
+        /* Mobile specific adjustments */
         @media (max-width: 768px) {
-            .action-tools { opacity: 1; }
+            .action-tools { opacity: 1; } /* Always show tools on mobile since no hover */
         }
+        
         @media print {
             .no-print { display: none !important; }
             .print-only { display: block !important; }
@@ -98,11 +100,6 @@
         const { useState, useEffect, useMemo, useRef } = React;
         const APP_ID = typeof __app_id !== 'undefined' ? __app_id : "hr_dashboard";
         
-        // --- SECURITY LOGIC: ENCRYPTION & DECRYPTION HELPERS ---
-        // Simple Base64 encoding to obfuscate the key in Firestore
-        const encodeKey = (key) => btoa(key); 
-        const decodeKey = (encodedKey) => atob(encodedKey);
-
         const Icon = ({ name, size = 20, className = "", color }) => {
             const ref = useRef(null);
             useEffect(() => {
@@ -141,15 +138,50 @@
 
         // --- Shared Logic for Auto Calculation ---
         const calculatePeriodStats = async (db, period, teamsList, silent = false) => {
-            const { collection, query, getDocs, getDoc, doc, setDoc, updateDoc, serverTimestamp } = window.firestore;
+            const { collection, query, where, getDocs, getDoc, doc, setDoc, updateDoc, serverTimestamp } = window.firestore;
             
             try {
+                let effectiveTeams = Array.isArray(teamsList) ? teamsList : [];
+                if (effectiveTeams.length === 0) {
+                    const teamQ = query(
+                        collection(db, 'artifacts', APP_ID, 'public', 'data', 'team_stats'),
+                        where("period", "==", period)
+                    );
+                    const teamSnap = await getDocs(teamQ);
+                    effectiveTeams = teamSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+                }
+
                 const q = query(collection(db, 'artifacts', APP_ID, 'public', 'data', 'survey_responses'));
                 const querySnapshot = await getDocs(q);
                 const currentDocs = querySnapshot.docs.filter(d => d.data().period === period);
+                const emptyMetrics = {
+                    burnout: { label: "번아웃 리스크", value: "-", diff: "0" },
+                    safety: { label: "심리적 안전감", value: "-", diff: "0" },
+                    enps: { label: "몰입도 (eNPS)", value: "-", diff: "0" },
+                    growth: { label: "성장 비전 공감", value: "-", diff: "0" }
+                };
 
                 if (currentDocs.length === 0) {
-                    if(!silent) alert(`현재 기간(${period})에 데이터가 없습니다.`);
+                    await setDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'global_stats', period), emptyMetrics);
+
+                    const chartRef = doc(db, 'artifacts', APP_ID, 'public', 'data', 'chart_stats', 'current');
+                    const chartSnap = await getDoc(chartRef);
+                    const currentTrend = chartSnap.exists() ? (chartSnap.data().trend || []) : [];
+                    await setDoc(chartRef, { trend: currentTrend.filter(t => t.label !== period) }, { merge: true });
+
+                    const resetPromises = effectiveTeams.map((team) =>
+                        updateDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'team_stats', team.id), {
+                            status: '양호',
+                            workload: '적정',
+                            conflict: '낮음',
+                            leadership: '보통',
+                            keywords: [],
+                            calculatedAt: serverTimestamp()
+                        })
+                    );
+                    await Promise.all(resetPromises);
+
+                    if(!silent) alert(`현재 기간(${period})에 데이터가 없어 통계가 초기화되었습니다.`);
                     return;
                 }
 
@@ -194,9 +226,19 @@
                 const updatedTrend = [...currentTrend.filter(t => t.label !== period), newTrendItem].sort((a,b) => a.label.localeCompare(b.label));
                 await setDoc(chartRef, { trend: updatedTrend }, { merge: true });
 
-                const updatePromises = teamsList.map(async (team) => {
+                const updatePromises = effectiveTeams.map(async (team) => {
                     const teamResponses = currentDocs.filter(d => d.data().teamId === team.id);
-                    if(teamResponses.length === 0) return;
+                    if(teamResponses.length === 0) {
+                        await updateDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'team_stats', team.id), {
+                            status: '양호',
+                            workload: '적정',
+                            conflict: '낮음',
+                            leadership: '보통',
+                            keywords: [],
+                            calculatedAt: serverTimestamp()
+                        });
+                        return;
+                    }
 
                     let tw=0, tr=0, tl=0;
                     teamResponses.forEach(d => {
@@ -207,6 +249,12 @@
                     const tAvgW = tw/tc;
                     const tAvgR = tr/tc;
                     const tAvgL = tl/tc;
+                    const teamKeywords = [...new Set(
+                        teamResponses
+                            .flatMap(d => String(d.data().keywords || '').split(','))
+                            .map(k => k.trim())
+                            .filter(Boolean)
+                    )];
 
                     let newStatus = '양호';
                     if (tAvgW >= 4.0 || tAvgR <= 2.5 || tAvgL <= 2.5) newStatus = '위험';
@@ -216,12 +264,14 @@
                         workload: tAvgW >= 4.0 ? '과부하' : '적정',
                         conflict: tAvgR <= 2.5 ? '높음' : '낮음',
                         leadership: tAvgL <= 2.5 ? '부족' : '보통',
+                        keywords: teamKeywords,
                         calculatedAt: serverTimestamp()
                     });
                 });
                 await Promise.all(updatePromises);
 
                 if(!silent) alert(`데이터 산출 완료! (총 ${count}건 반영)\n팀 상태가 자동 업데이트되었습니다.`);
+                console.log(`[Auto-Calc] Metrics updated for ${period}. Count: ${count}`);
 
             } catch(e) {
                 console.error("Auto Calc Error:", e);
@@ -321,6 +371,30 @@
         const SurveyView = ({ teamStats, currentPeriod }) => {
             const [surveyData, setSurveyData] = useState({ teamId: "", workload: "3", relationship: "3", leadership: "3", keywords: "" });
             const [submitted, setSubmitted] = useState(false);
+            const [keywordInput, setKeywordInput] = useState("");
+            const keywordList = useMemo(() => {
+                const items = String(surveyData.keywords || "")
+                    .split(',')
+                    .map(k => k.trim())
+                    .filter(Boolean);
+                return [...new Set(items)];
+            }, [surveyData.keywords]);
+
+            const setKeywordList = (nextList) => {
+                const cleaned = [...new Set(nextList.map(k => String(k || '').trim()).filter(Boolean))];
+                setSurveyData(prev => ({ ...prev, keywords: cleaned.join(', ') }));
+            };
+
+            const addKeywordFromInput = () => {
+                const v = String(keywordInput || '').trim();
+                if (!v) return;
+                setKeywordList([...keywordList, v]);
+                setKeywordInput("");
+            };
+
+            const removeKeyword = (target) => {
+                setKeywordList(keywordList.filter(k => k !== target));
+            };
 
             const handleSubmit = async (e) => {
                 e.preventDefault();
@@ -336,13 +410,6 @@
                         createdAt: window.firestore.serverTimestamp()
                     });
 
-                    const teamDoc = teamStats.find(t => t.id === surveyData.teamId);
-                    if(teamDoc) {
-                        const newKeywords = surveyData.keywords.split(',').map(k => k.trim()).filter(k => k);
-                        const updatedKeywords = [...(teamDoc.keywords || []), ...newKeywords];
-                        await window.firestore.updateDoc(window.firestore.doc(window.db, 'artifacts', APP_ID, 'public', 'data', 'team_stats', surveyData.teamId), { keywords: updatedKeywords });
-                    }
-                    
                     await calculatePeriodStats(window.db, currentPeriod, teamStats, true); 
 
                     setSubmitted(true);
@@ -354,35 +421,97 @@
                     <div className="w-16 h-16 bg-green-100 text-green-600 rounded-full flex items-center justify-center mb-4"><Icon name="check" size={32} className="text-green-600" /></div>
                     <h2 className="text-2xl font-bold text-slate-800 mb-2">제출 완료</h2>
                     <p className="text-slate-500 mb-6">소중한 의견이 안전하게 저장되었습니다.</p>
-                    <button onClick={() => { setSubmitted(false); setSurveyData({ teamId: "", workload: "3", relationship: "3", leadership: "3", keywords: "" }); }} className="text-blue-600 font-bold hover:underline">추가 제출하기</button>
+                    <button onClick={() => { setSubmitted(false); setSurveyData({ teamId: "", workload: "3", relationship: "3", leadership: "3", keywords: "" }); setKeywordInput(""); }} className="text-blue-600 font-bold hover:underline">추가 제출하기</button>
                 </div>
             );
 
             return (
-                <div className="max-w-2xl mx-auto bg-white rounded-xl shadow-sm border border-slate-100 p-4 md:p-8 animate-fade-in my-4 md:my-10">
-                    <div className="text-center mb-6 md:mb-8"><h1 className="text-xl md:text-2xl font-bold text-slate-800">주간 조직 진단 (Weekly Pulse Survey)</h1></div>
-                    <form onSubmit={handleSubmit} className="space-y-6">
+                <div className="max-w-3xl mx-auto bg-white rounded-2xl shadow-md border border-slate-100 p-4 md:p-8 animate-fade-in my-4 md:my-10">
+                    <div className="text-center mb-6 md:mb-8">
+                        <h1 className="text-xl md:text-2xl font-bold text-slate-800">주간 조직 진단 (Weekly Pulse Survey)</h1>
+                        <p className="text-xs md:text-sm text-slate-400 mt-2">5점 척도로 선택하고, 키워드는 태그로 빠르게 추가하세요.</p>
+                    </div>
+                    <form onSubmit={handleSubmit} className="space-y-7 pb-20 md:pb-0">
                         <div>
                             <label className="block text-sm font-bold text-slate-700 mb-2">소속 부서</label>
-                            <select value={surveyData.teamId} onChange={e => setSurveyData({...surveyData, teamId: e.target.value})} className="w-full px-4 py-3 border border-slate-200 rounded-lg bg-slate-50" required>
+                            <select value={surveyData.teamId} onChange={e => setSurveyData({...surveyData, teamId: e.target.value})} className="w-full px-4 py-3 border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-200" required>
                                 <option value="">부서를 선택해주세요</option>
                                 {teamStats.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
                             </select>
                         </div>
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                        <div className="space-y-4">
                             {[{ id: 'workload', label: '업무량' }, { id: 'relationship', label: '동료 관계' }, { id: 'leadership', label: '리더십' }].map(f => (
-                                <div key={f.id} className="bg-slate-50 p-5 rounded-lg border border-slate-100">
-                                    <div className="flex justify-between items-end mb-4"><label className="block text-sm font-bold text-slate-700">{f.label}</label><span className="text-sm font-bold text-blue-600 bg-blue-50 px-2 rounded">{surveyData[f.id]}점</span></div>
-                                    <input type="range" min="1" max="5" value={surveyData[f.id]} onChange={e => setSurveyData({...surveyData, [f.id]: e.target.value})} className="w-full accent-blue-600" />
-                                    <div className="flex justify-between mt-2 px-1">{[1, 2, 3, 4, 5].map(num => (<div key={num} className="flex flex-col items-center cursor-pointer" onClick={() => setSurveyData({...surveyData, [f.id]: String(num)})}> <div className="h-1.5 w-px bg-slate-300 mb-1"></div><span className={`text-xs font-bold transition-all duration-200 ${String(surveyData[f.id]) === String(num) ? 'text-blue-600 scale-125' : 'text-slate-300'}`}>{num}</span></div>))}</div>
+                                <div key={f.id} className="bg-slate-50 p-5 rounded-xl border border-slate-100 shadow-sm">
+                                    <div className="flex items-center justify-between mb-3">
+                                        <label className="block text-base font-extrabold text-slate-800">{f.label}</label>
+                                        <span className="text-sm font-bold text-blue-700 bg-blue-50 px-2.5 py-1 rounded-full">{surveyData[f.id]}점</span>
+                                    </div>
+                                    <p className="text-xs text-slate-400 mb-3">가장 가까운 상태를 선택하세요.</p>
+                                    <div className="flex gap-2 overflow-x-auto pb-1">
+                                        {[1, 2, 3, 4, 5].map(num => {
+                                            const selected = String(surveyData[f.id]) === String(num);
+                                            const levelLabel = ['매우 낮음', '낮음', '보통', '좋음', '매우 좋음'][num - 1];
+                                            const selectedTone = num <= 2
+                                                ? 'border-rose-500 bg-rose-500 text-white shadow-rose-200'
+                                                : num === 3
+                                                    ? 'border-amber-500 bg-amber-500 text-white shadow-amber-200'
+                                                    : 'border-emerald-500 bg-emerald-500 text-white shadow-emerald-200';
+                                            return (
+                                                <button
+                                                    key={num}
+                                                    type="button"
+                                                    onClick={() => setSurveyData({ ...surveyData, [f.id]: String(num) })}
+                                                    className={`min-w-[88px] rounded-xl border px-3 py-3 text-center transition-all ${
+                                                        selected
+                                                            ? `${selectedTone} shadow-md`
+                                                            : 'border-slate-200 bg-white text-slate-600 hover:border-blue-300 hover:bg-blue-50'
+                                                    }`}
+                                                    aria-label={`${f.label} ${num}점`}
+                                                >
+                                                    <div className={`text-lg font-black ${selected ? 'text-white' : 'text-slate-800'}`}>{num}</div>
+                                                    <div className={`mt-1 text-[11px] font-semibold ${selected ? 'text-white/90' : 'text-slate-400'}`}>{levelLabel}</div>
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
                                 </div>
                             ))}
                         </div>
                         <div>
-                            <label className="block text-sm font-bold text-slate-700 mb-2">키워드 (쉼표 구분)</label>
-                            <input type="text" placeholder="예: 소통 부재, 야근..." value={surveyData.keywords} onChange={e => setSurveyData({...surveyData, keywords: e.target.value})} className="w-full px-4 py-3 border border-slate-200 rounded-lg" />
+                            <label className="block text-sm font-bold text-slate-700 mb-3">키워드 태그</label>
+                            <div className="w-full px-4 py-4 border border-slate-200 rounded-xl bg-white">
+                                <div className="flex flex-wrap gap-2.5 mb-3 min-h-10 items-center">
+                                    {keywordList.length === 0 && <span className="text-sm text-slate-400">예: 소통 부재, 야근, 협업 개선</span>}
+                                    {keywordList.map((tag) => (
+                                        <span key={tag} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-blue-50 text-blue-700 text-sm font-semibold border border-blue-100">
+                                            {tag}
+                                            <button type="button" className="text-blue-500 hover:text-blue-700" onClick={() => removeKeyword(tag)} aria-label={`${tag} 삭제`}>
+                                                <Icon name="x" size={12} />
+                                            </button>
+                                        </span>
+                                    ))}
+                                </div>
+                                <input
+                                    type="text"
+                                    placeholder="입력 후 Enter 또는 쉼표(,)로 추가"
+                                    value={keywordInput}
+                                    onChange={e => setKeywordInput(e.target.value)}
+                                    onKeyDown={e => {
+                                        if (e.key === 'Enter' || e.key === ',') {
+                                            e.preventDefault();
+                                            addKeywordFromInput();
+                                        } else if (e.key === 'Backspace' && !keywordInput && keywordList.length > 0) {
+                                            removeKeyword(keywordList[keywordList.length - 1]);
+                                        }
+                                    }}
+                                    onBlur={addKeywordFromInput}
+                                    className="w-full px-2 py-2.5 text-base outline-none"
+                                />
+                            </div>
                         </div>
-                        <button type="submit" className="w-full bg-blue-600 text-white py-4 rounded-xl font-bold hover:bg-blue-700 transition shadow-lg shadow-blue-200">익명 제출</button>
+                        <div className="sticky bottom-0 -mx-4 px-4 py-3 bg-white/95 backdrop-blur border-t border-slate-100 md:static md:mx-0 md:px-0 md:py-0 md:bg-transparent md:border-0">
+                            <button type="submit" className="w-full bg-blue-600 text-white py-4 rounded-xl font-bold hover:bg-blue-700 transition shadow-lg shadow-blue-200">익명 제출</button>
+                        </div>
                     </form>
                 </div>
             );
@@ -463,7 +592,7 @@
         };
 
         // --- REAL AI Plan Generation Modal with Mock Fallback ---
-        const SolutionGeneratorModal = ({ solution, onClose }) => {
+        const SolutionGeneratorModal = ({ solution, onClose, aiConfig }) => {
             const [step, setStep] = useState('initializing'); 
             const [aiPlan, setAiPlan] = useState(null);
             const [errorMessage, setErrorMessage] = useState("");
@@ -502,89 +631,78 @@
                 const runProcess = async () => {
                     try {
                         setStep('initializing');
-                        
-                        // Fetch the secure key from Firebase
-                        // Note: Using 'public/data/admin_secrets' for simplicity in this demo. 
-                        // In production, use strict Firestore Rules to protect this path.
-                        let apiKey = "";
-                        try {
-                            const secretDoc = await window.firestore.getDoc(window.firestore.doc(window.db, 'artifacts', APP_ID, 'public', 'data', 'admin_secrets', 'config'));
-                            if (secretDoc.exists() && secretDoc.data().apiKey) {
-                                apiKey = decodeKey(secretDoc.data().apiKey);
-                            }
-                        } catch(e) { console.warn("Key fetch failed", e); }
+                        const apiKey = String(aiConfig?.apiKey || '').trim();
+                        const savedModel = String(aiConfig?.selectedModel || '').trim();
+                        const apiVersion = "v1beta";
+                        const fallbackModels = [savedModel, "gemini-1.5-flash", "gemini-1.5-pro"].filter(Boolean);
+                        const modelsToTry = [...new Set(fallbackModels)];
 
                         if (!apiKey) {
-                            throw new Error("API 키가 설정되지 않았습니다. [설정] 메뉴에서 키를 등록해주세요.");
+                            throw new Error("API key not configured");
                         }
 
-                        let targetModel = "gemini-1.5-flash"; 
-                        let apiVersion = "v1beta";      
-
-                        // Try 1: 1.5-flash
-                        try {
-                            const genUrl = `https://generativelanguage.googleapis.com/${apiVersion}/models/${targetModel}:generateContent?key=${apiKey}`;
+                        const prompt = `
+                            You are a top-tier HR consultant.
+                            The team has a specific issue:
+                            - Category: ${solution.category}
+                            - Issue Title: ${solution.title}
+                            - Description: ${solution.desc}
                             
-                            const prompt = `
-                                You are a top-tier HR consultant.
-                                The team has a specific issue:
-                                - Category: ${solution.category}
-                                - Issue Title: ${solution.title}
-                                - Description: ${solution.desc}
-                                
-                                Please provide a very concrete, actionable 3-step solution plan.
-                                Return ONLY a valid JSON object:
-                                {
-                                  "steps": [
-                                    {"title": "Step 1 Title", "desc": "Desc"},
-                                    {"title": "Step 2 Title", "desc": "Desc"},
-                                    {"title": "Step 3 Title", "desc": "Desc"}
-                                  ]
-                                }
-                                Respond in Korean.
-                            `;
-
-                            const response = await fetch(genUrl, {
-                                method: "POST",
-                                headers: { "Content-Type": "application/json" },
-                                body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
-                            });
-
-                            const data = await response.json();
-
-                            if (data.error) throw new Error(data.error.message);
-                            
-                            if (data.candidates && data.candidates[0].content) {
-                                const rawText = data.candidates[0].content.parts[0].text;
-                                const jsonText = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
-                                const parsedPlan = JSON.parse(jsonText);
-                                setAiPlan(parsedPlan);
-                                setUsedModel(targetModel);
-                                setStep('content');
-                                return;
-                            } else {
-                                throw new Error("No output");
+                            Please provide a very concrete, actionable 3-step solution plan.
+                            Return ONLY a valid JSON object:
+                            {
+                              "steps": [
+                                {"title": "Step 1 Title", "desc": "Desc"},
+                                {"title": "Step 2 Title", "desc": "Desc"},
+                                {"title": "Step 3 Title", "desc": "Desc"}
+                              ]
                             }
+                            Respond in Korean.
+                        `;
 
-                        } catch (e) {
-                            console.warn("Flash model failed, trying fallback...", e);
-                            throw e; // Throw to trigger mock fallback
+                        for (const targetModel of modelsToTry) {
+                            try {
+                                const genUrl = `https://generativelanguage.googleapis.com/${apiVersion}/models/${targetModel}:generateContent?key=${apiKey}`;
+                                const response = await fetch(genUrl, {
+                                    method: "POST",
+                                    headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+                                });
+                                const data = await response.json();
+                                if (data.error) throw new Error(data.error.message);
+                                if (data.candidates && data.candidates[0]?.content?.parts?.[0]?.text) {
+                                    const rawText = data.candidates[0].content.parts[0].text;
+                                    const jsonText = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
+                                    const parsedPlan = JSON.parse(jsonText);
+                                    setAiPlan(parsedPlan);
+                                    setUsedModel(targetModel);
+                                    setIsMock(false);
+                                    setStep('content');
+                                    return;
+                                }
+                                throw new Error("No output");
+                            } catch (e) {
+                                console.warn(`Model failed: ${targetModel}`, e);
+                            }
                         }
+
+                        await new Promise(r => setTimeout(r, 1000));
+                        setAiPlan(generateMockPlan(solution.category));
+                        setUsedModel("Simulation Mode (Model Fallback)");
+                        setIsMock(true);
+                        setStep('content');
 
                     } catch (e) {
-                        console.error("AI Error:", e);
-                        // Fallback: Use Mock Data (Simulation Mode)
-                        if(e.message.includes("API 키")) alert(e.message);
-                        
+                        console.error("Fatal Error:", e);
                         setAiPlan(generateMockPlan(solution.category));
-                        setUsedModel("Simulation Mode (Key Missing or Error)");
+                        setUsedModel("Simulation Mode (API Key Missing/Error)");
                         setIsMock(true);
                         setStep('content');
                     }
                 };
 
                 runProcess();
-            }, [solution]);
+            }, [solution, aiConfig]);
 
             const savePlan = async () => {
                 if(!aiPlan) return;
@@ -623,7 +741,14 @@
                         {step === 'initializing' && (
                             <div className="py-12 text-center">
                                 <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-slate-400 mx-auto mb-4"></div>
-                                <p className="text-slate-600 font-medium">보안 키 확인 및 AI 연결 중...</p>
+                                <p className="text-slate-600 font-medium">최적의 AI 모델 탐색 중...</p>
+                            </div>
+                        )}
+
+                        {step === 'loading' && (
+                            <div className="py-12 text-center">
+                                <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600 mx-auto mb-4"></div>
+                                <p className="text-slate-600 font-medium animate-pulse">조직 데이터를 분석하여 최적의 실행 계획을 생성 중입니다...</p>
                             </div>
                         )}
 
@@ -647,7 +772,7 @@
                                     <button onClick={savePlan} className="px-4 py-2 bg-blue-600 text-white rounded text-sm font-bold hover:bg-blue-700 shadow-md">실행 계획 저장</button>
                                 </div>
                                 <p className="text-[10px] text-slate-400 mt-2 text-right">
-                                    {isMock && "⚠️ API 한도/키 오류로 시뮬레이션 모드로 전환되었습니다."} 
+                                    {isMock && "⚠️ API 한도 초과로 시뮬레이션 모드로 전환되었습니다."} 
                                     생성 모델: {usedModel}
                                 </p>
                             </div>
@@ -657,125 +782,210 @@
             );
         };
 
-        const AnalysisView = ({ teamStats, globalMetrics }) => {
+        const AnalysisView = ({ teamStats, globalMetrics, chartData, currentPeriod, aiConfig }) => {
             const [selectedSolution, setSelectedSolution] = useState(null);
+            const toNumber = (val, fallback = 0) => {
+                const parsed = parseFloat(String(val ?? '').replace(/[^\d.-]/g, ''));
+                return Number.isFinite(parsed) ? parsed : fallback;
+            };
 
-            // Filter risky teams
-            const riskyTeams = teamStats.filter(t => t.status === '위험' || t.status === '심각');
-            const highWorkloadTeams = teamStats.filter(t => t.workload === '과부하');
-            const conflictTeams = teamStats.filter(t => t.conflict === '높음');
+            const burnoutScore = toNumber(globalMetrics?.burnout?.value, 0);
+            const safetyScore = toNumber(globalMetrics?.safety?.value, 0);
+            const enpsScore = toNumber(globalMetrics?.enps?.value, 0);
 
-            // Generate Recommendations
+            const trendData = Array.isArray(chartData?.trend) ? chartData.trend : [];
+            const trendDelta = trendData.length >= 2
+                ? toNumber(trendData[trendData.length - 1].value, 0) - toNumber(trendData[trendData.length - 2].value, 0)
+                : 0;
+
+            const teamRiskRows = useMemo(() => {
+                return (teamStats || []).map((team) => {
+                    let riskScore = 0;
+                    const drivers = [];
+                    if (team.status === '심각') { riskScore += 45; drivers.push('상태 심각'); }
+                    else if (team.status === '위험') { riskScore += 35; drivers.push('상태 위험'); }
+                    if (team.workload === '과부하') { riskScore += 25; drivers.push('업무 과부하'); }
+                    if (team.conflict === '높음') { riskScore += 20; drivers.push('관계 갈등'); }
+                    if (team.leadership === '부족') { riskScore += 15; drivers.push('리더십 이슈'); }
+                    if ((team.keywords || []).length >= 5) { riskScore += 5; drivers.push('이슈 키워드 다수'); }
+                    const riskLevel = riskScore >= 60 ? 'high' : riskScore >= 35 ? 'medium' : 'low';
+                    return { ...team, riskScore, riskLevel, drivers };
+                }).sort((a, b) => b.riskScore - a.riskScore);
+            }, [teamStats]);
+
+            const riskyTeams = teamRiskRows.filter(t => t.riskLevel !== 'low');
+            const highWorkloadTeams = teamRiskRows.filter(t => t.workload === '과부하');
+            const conflictTeams = teamRiskRows.filter(t => t.conflict === '높음');
+
+            const keywordRank = useMemo(() => {
+                const counts = {};
+                (teamStats || []).forEach((team) => {
+                    (team.keywords || []).forEach((k) => {
+                        const key = String(k || '').trim();
+                        if (!key) return;
+                        counts[key] = (counts[key] || 0) + 1;
+                    });
+                });
+                return Object.entries(counts)
+                    .map(([text, count]) => ({ text, count }))
+                    .sort((a, b) => b.count - a.count)
+                    .slice(0, 8);
+            }, [teamStats]);
+
             const recommendations = [];
+            if (riskyTeams.length > 0) {
+                recommendations.push({
+                    type: 'urgent',
+                    category: 'Risk',
+                    title: '고위험 팀 집중 케어 플랜',
+                    desc: `${riskyTeams.slice(0, 3).map(t => t.name).join(', ')} 팀이 복합 리스크를 보입니다. 2주 내 팀장 면담/업무 재조정/갈등 중재를 병행하세요.`,
+                    action: '집중 케어',
+                    priorityScore: 95
+                });
+            }
             if (highWorkloadTeams.length > 0) {
                 recommendations.push({
                     type: 'urgent',
                     category: 'Resource',
-                    title: '인력 재배치 및 채용 검토 필요',
-                    desc: `${highWorkloadTeams.map(t=>t.name).join(', ')} 팀의 업무 과부하가 지속되고 있습니다. 단기적으로는 R&R 재조정, 장기적으로는 인력 충원이 시급합니다.`,
-                    action: '직무 분석 실행'
+                    title: '업무 과부하 해소를 위한 R&R 재설계',
+                    desc: `${highWorkloadTeams.slice(0, 3).map(t => t.name).join(', ')} 팀은 업무량 리스크가 큽니다. 저부가 업무 이관과 우선순위 재정렬이 필요합니다.`,
+                    action: '리소스 조정',
+                    priorityScore: 90
                 });
             }
-            if (conflictTeams.length > 0) {
+            if (conflictTeams.length > 0 || safetyScore < 3.2) {
                 recommendations.push({
                     type: 'warning',
                     category: 'Culture',
-                    title: '관계 갈등 해소 워크숍',
-                    desc: `${conflictTeams.map(t=>t.name).join(', ')} 팀 내 소통 이슈가 감지되었습니다. 심리적 안전감을 높이기 위한 퍼실리테이팅이 필요합니다.`,
-                    action: '1on1 미팅 강화'
+                    title: '관계 갈등/심리적 안전감 개선 프로그램',
+                    desc: `갈등 신호 팀(${conflictTeams.length}개)과 낮은 안전감(${safetyScore.toFixed(1)}점)을 고려해 팀 단위 퍼실리테이션과 1:1 코칭을 권장합니다.`,
+                    action: '문화 개선',
+                    priorityScore: 82
+                });
+            }
+            if (burnoutScore >= 70 || enpsScore < 0 || trendDelta < 0) {
+                recommendations.push({
+                    type: 'warning',
+                    category: 'Retention',
+                    title: '이탈 방지 사전 대응',
+                    desc: `번아웃(${burnoutScore.toFixed(0)}%), eNPS(${enpsScore}), 추이 변화(${trendDelta >= 0 ? '+' : ''}${trendDelta})를 보면 이탈 리스크가 있습니다. 핵심 인력 케어 계획을 선제 수립하세요.`,
+                    action: '이탈 예방',
+                    priorityScore: 80
+                });
+            }
+            if (keywordRank.length > 0) {
+                recommendations.push({
+                    type: 'good',
+                    category: 'Voice',
+                    title: '키워드 기반 개선 실험 운영',
+                    desc: `상위 키워드(${keywordRank.slice(0, 3).map(k => k.text).join(', ')}) 중심으로 4주 단위 개선 실험을 진행하고 성과를 비교하세요.`,
+                    action: '실험 설계',
+                    priorityScore: 70
                 });
             }
             if (recommendations.length === 0) {
                 recommendations.push({
                     type: 'good',
                     category: 'Growth',
-                    title: '성장 모멘텀 강화',
-                    desc: '전반적인 조직 건강도가 양호합니다. 현재의 긍정적 문화를 유지하면서, 구성원의 커리어 성장을 지원하는 멘토링 프로그램을 도입해보세요.',
-                    action: '멘토링 프로그램 기획'
+                    title: '현 상태 유지 + 성장 투자',
+                    desc: '현재 위험 신호가 낮습니다. 우수 사례 문서화와 리더 코칭으로 건강한 조직 상태를 안정적으로 유지하세요.',
+                    action: '성장 강화',
+                    priorityScore: 60
                 });
             }
+            recommendations.sort((a, b) => b.priorityScore - a.priorityScore);
 
             return (
                 <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-6 fade-in h-full overflow-y-auto">
                     <h2 className="text-xl font-bold text-slate-800 mb-6 flex items-center gap-2">
                         <Icon name="microscope" className="text-blue-600"/> 조직 심층 분석 및 개선 제언
                     </h2>
+                    <p className="text-sm text-slate-500 mb-6">기준 기간: <span className="font-bold text-slate-700">{currentPeriod}</span></p>
                     
-                    {/* 1. Key Issues Summary */}
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-                        <div className="bg-red-50 p-5 rounded-xl border border-red-100">
-                            <h3 className="text-red-800 font-bold mb-2 flex items-center gap-2"><Icon name="siren" size={18}/> 긴급 관리 필요</h3>
-                            <p className="text-3xl font-bold text-red-600">{riskyTeams.length}<span className="text-sm font-normal text-red-400 ml-1">개 팀</span></p>
-                            <p className="text-xs text-red-500 mt-2">즉각적인 개입이 필요한 고위험 그룹</p>
+                    <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+                        <div className="bg-red-50 p-4 rounded-xl border border-red-100">
+                            <p className="text-xs text-red-500 font-bold">고위험 팀</p>
+                            <p className="text-2xl font-black text-red-700 mt-1">{teamRiskRows.filter(t => t.riskLevel === 'high').length}개</p>
                         </div>
-                        <div className="bg-orange-50 p-5 rounded-xl border border-orange-100">
-                            <h3 className="text-orange-800 font-bold mb-2 flex items-center gap-2"><Icon name="activity" size={18}/> 번아웃 경보</h3>
-                            <p className="text-3xl font-bold text-orange-600">{globalMetrics.burnout?.value || '0%'}</p>
-                            <p className="text-xs text-orange-500 mt-2">전사 평균 번아웃 리스크 지수</p>
+                        <div className="bg-orange-50 p-4 rounded-xl border border-orange-100">
+                            <p className="text-xs text-orange-500 font-bold">번아웃 지수</p>
+                            <p className="text-2xl font-black text-orange-700 mt-1">{burnoutScore.toFixed(0)}%</p>
                         </div>
-                        <div className="bg-blue-50 p-5 rounded-xl border border-blue-100">
-                            <h3 className="text-blue-800 font-bold mb-2 flex items-center gap-2"><Icon name="smile" size={18}/> 긍정 응답률</h3>
-                            <p className="text-3xl font-bold text-blue-600">{(Number(globalMetrics.safety?.value || 0) * 20).toFixed(0)}%</p>
-                            <p className="text-xs text-blue-500 mt-2">심리적 안전감 환산 점수</p>
+                        <div className="bg-blue-50 p-4 rounded-xl border border-blue-100">
+                            <p className="text-xs text-blue-500 font-bold">eNPS</p>
+                            <p className="text-2xl font-black text-blue-700 mt-1">{enpsScore > 0 ? '+' : ''}{enpsScore}</p>
+                        </div>
+                        <div className="bg-violet-50 p-4 rounded-xl border border-violet-100">
+                            <p className="text-xs text-violet-500 font-bold">추이 변화</p>
+                            <p className="text-2xl font-black text-violet-700 mt-1">{trendDelta > 0 ? '+' : ''}{trendDelta}</p>
                         </div>
                     </div>
 
-                    {/* 2. Priority Matrix & Action Plans */}
-                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                        <div>
-                            <h3 className="font-bold text-slate-700 mb-4 text-lg">⚠️ 주요 이슈 (Priority Issues)</h3>
-                            {riskyTeams.length === 0 ? (
-                                <div className="bg-green-50 p-6 rounded-xl border border-green-100 text-center">
-                                    <Icon name="check-circle" size={40} className="text-green-500 mx-auto mb-3" />
-                                    <p className="text-green-800 font-bold">발견된 위험 요소가 없습니다.</p>
-                                    <p className="text-green-600 text-sm">모든 팀이 안정적인 상태를 유지하고 있습니다.</p>
-                                </div>
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
+                        <div className="bg-slate-50 p-5 rounded-xl border border-slate-200">
+                            <h3 className="font-bold text-slate-800 mb-4">팀 리스크 우선순위</h3>
+                            {teamRiskRows.length === 0 ? (
+                                <p className="text-sm text-slate-500">등록된 팀 데이터가 없습니다.</p>
                             ) : (
                                 <div className="space-y-3">
-                                    {riskyTeams.map(t => (
-                                        <div key={t.id} className="flex items-center justify-between p-4 bg-white border border-slate-200 rounded-lg shadow-sm hover:shadow-md transition-shadow">
-                                            <div>
-                                                <span className="font-bold text-slate-800">{t.name}</span>
-                                                <div className="flex gap-2 mt-1">
-                                                    {t.workload === '과부하' && <span className="text-xs bg-red-100 text-red-600 px-2 py-0.5 rounded">업무 과다</span>}
-                                                    {(t.conflict === '높음' || t.status === '위험') && <span className="text-xs bg-orange-100 text-orange-600 px-2 py-0.5 rounded">집중 케어 필요</span>}
-                                                </div>
+                                    {teamRiskRows.slice(0, 6).map(team => (
+                                        <div key={team.id} className="bg-white p-3 rounded-lg border border-slate-200">
+                                            <div className="flex justify-between items-center">
+                                                <p className="font-bold text-slate-800">{team.name}</p>
+                                                <span className={`text-xs font-bold px-2 py-1 rounded ${team.riskLevel === 'high' ? 'bg-red-100 text-red-700' : team.riskLevel === 'medium' ? 'bg-orange-100 text-orange-700' : 'bg-green-100 text-green-700'}`}>
+                                                    Risk {team.riskScore}
+                                                </span>
                                             </div>
-                                            <button className="text-sm bg-slate-800 text-white px-3 py-1.5 rounded hover:bg-slate-700">면담 예약</button>
+                                            <p className="text-xs text-slate-500 mt-1">{team.drivers.length > 0 ? team.drivers.join(' · ') : '특이 리스크 없음'}</p>
                                         </div>
                                     ))}
                                 </div>
                             )}
                         </div>
 
-                        <div>
-                            <h3 className="font-bold text-slate-700 mb-4 text-lg">💡 맞춤형 개선 솔루션 (Solutions)</h3>
-                            <div className="space-y-4">
-                                {recommendations.map((rec, idx) => (
-                                    <div key={idx} className="bg-white border border-slate-200 p-5 rounded-xl shadow-sm relative overflow-hidden">
-                                        <div className={`absolute top-0 left-0 w-1 h-full ${rec.type === 'urgent' ? 'bg-red-500' : rec.type === 'warning' ? 'bg-orange-500' : 'bg-green-500'}`}></div>
-                                        <div className="flex justify-between items-start mb-2">
-                                            <span className={`text-xs font-bold px-2 py-1 rounded uppercase ${rec.type === 'urgent' ? 'bg-red-100 text-red-700' : rec.type === 'warning' ? 'bg-orange-100 text-orange-700' : 'bg-green-100 text-green-700'}`}>
-                                                {rec.category}
-                                            </span>
-                                        </div>
-                                        <h4 className="font-bold text-slate-900 text-md mb-1">{rec.title}</h4>
-                                        <p className="text-sm text-slate-600 mb-4 leading-relaxed">{rec.desc}</p>
-                                        <button 
-                                            onClick={() => setSelectedSolution(rec)}
-                                            className="w-full py-2 border border-slate-300 rounded-lg text-sm font-bold text-slate-700 hover:bg-slate-50 flex items-center justify-center gap-2"
-                                        >
-                                            <Icon name="check-square" size={16}/> {rec.action} 계획 수립
-                                        </button>
+                        <div className="bg-slate-50 p-5 rounded-xl border border-slate-200">
+                            <h3 className="font-bold text-slate-800 mb-4">핵심 이슈 키워드</h3>
+                            {keywordRank.length === 0 ? (
+                                <p className="text-sm text-slate-500">키워드 데이터가 없습니다.</p>
+                            ) : (
+                                <div className="flex flex-wrap gap-2">
+                                    {keywordRank.map((k) => (
+                                        <span key={k.text} className="px-3 py-1.5 rounded-full text-sm bg-white border border-slate-200 text-slate-700">
+                                            {k.text} <span className="text-xs text-slate-400 ml-1">{k.count}</span>
+                                        </span>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+
+                    <div>
+                        <h3 className="font-bold text-slate-700 mb-4 text-lg">맞춤형 개선 솔루션</h3>
+                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                            {recommendations.map((rec, idx) => (
+                                <div key={idx} className="bg-white border border-slate-200 p-5 rounded-xl shadow-sm relative overflow-hidden">
+                                    <div className={`absolute top-0 left-0 w-1 h-full ${rec.type === 'urgent' ? 'bg-red-500' : rec.type === 'warning' ? 'bg-orange-500' : 'bg-green-500'}`}></div>
+                                    <div className="flex justify-between items-center mb-2">
+                                        <span className={`text-xs font-bold px-2 py-1 rounded uppercase ${rec.type === 'urgent' ? 'bg-red-100 text-red-700' : rec.type === 'warning' ? 'bg-orange-100 text-orange-700' : 'bg-green-100 text-green-700'}`}>{rec.category}</span>
+                                        <span className="text-[11px] text-slate-400">우선순위 {rec.priorityScore}</span>
                                     </div>
-                                ))}
-                            </div>
+                                    <h4 className="font-bold text-slate-900 text-md mb-1">{rec.title}</h4>
+                                    <p className="text-sm text-slate-600 mb-4 leading-relaxed">{rec.desc}</p>
+                                    <button 
+                                        onClick={() => setSelectedSolution(rec)}
+                                        className="w-full py-2 border border-slate-300 rounded-lg text-sm font-bold text-slate-700 hover:bg-slate-50 flex items-center justify-center gap-2"
+                                    >
+                                        <Icon name="check-square" size={16}/> {rec.action} 계획 수립
+                                    </button>
+                                </div>
+                            ))}
                         </div>
                     </div>
 
                     {selectedSolution && (
                         <SolutionGeneratorModal 
                             solution={selectedSolution} 
+                            aiConfig={aiConfig}
                             onClose={() => setSelectedSolution(null)} 
                         />
                     )}
@@ -786,6 +996,7 @@
         const DataManagementView = ({ teamStats, currentPeriod }) => {
             const [responses, setResponses] = useState([]);
             const [loading, setLoading] = useState(true);
+            const syncedEmptyPeriodRef = useRef("");
 
             useEffect(() => {
                 if(!window.db) return;
@@ -816,6 +1027,16 @@
                     
                     setResponses(data);
                     setLoading(false);
+
+                    if (data.length === 0 && syncedEmptyPeriodRef.current !== currentPeriod) {
+                        syncedEmptyPeriodRef.current = currentPeriod;
+                        calculatePeriodStats(window.db, currentPeriod, teamStats, true).catch((e) => {
+                            console.error("Empty-state sync failed:", e);
+                        });
+                    }
+                    if (data.length > 0) {
+                        syncedEmptyPeriodRef.current = "";
+                    }
                 }, (error) => {
                     console.error("Error fetching responses:", error);
                     setLoading(false);
@@ -909,13 +1130,22 @@
             );
         };
 
-        const SettingsView = ({ globalMetrics, chartData, availableYears, setAvailableYears, currentPeriod, teamStats }) => {
+        const SettingsView = ({ globalMetrics, chartData, availableYears, setAvailableYears, currentPeriod, teamStats, aiConfig }) => {
             const [form, setForm] = useState(globalMetrics);
             const [newYear, setNewYear] = useState("");
             const [resetConfirm, setResetConfirm] = useState(false);
-            const [apiKeyInput, setApiKeyInput] = useState("");
+            const [aiApiKeyInput, setAiApiKeyInput] = useState("");
+            const [aiModels, setAiModels] = useState([]);
+            const [aiSelectedModel, setAiSelectedModel] = useState("");
+            const [isSearchingModels, setIsSearchingModels] = useState(false);
+            const [isSavingAiConfig, setIsSavingAiConfig] = useState(false);
 
             useEffect(() => setForm(globalMetrics), [globalMetrics]);
+            useEffect(() => {
+                setAiApiKeyInput(aiConfig?.apiKey || "");
+                setAiModels(Array.isArray(aiConfig?.models) ? aiConfig.models : []);
+                setAiSelectedModel(aiConfig?.selectedModel || "");
+            }, [aiConfig]);
 
             const handleMetricChange = (key, field, val) => {
                 setForm(prev => ({ ...prev, [key]: { ...prev[key], [field]: val } }));
@@ -962,49 +1192,127 @@
                 alert("차트 데이터가 초기화되었습니다.");
             };
 
-            // --- API KEY MANAGEMENT ---
-            const saveApiKey = async () => {
-                if (!apiKeyInput.trim()) return alert("키를 입력해주세요.");
+            const saveAiSettings = async (next = {}) => {
                 try {
-                    // Save encoded key to Firestore (simulating safe backend storage)
-                    const encoded = encodeKey(apiKeyInput.trim());
-                    await window.firestore.setDoc(window.firestore.doc(window.db, 'artifacts', APP_ID, 'public', 'data', 'admin_secrets', 'config'), {
-                        apiKey: encoded,
+                    setIsSavingAiConfig(true);
+                    const merged = {
+                        keyStorageMode: 'cloud',
+                        apiKey: aiApiKeyInput,
+                        models: aiModels,
+                        selectedModel: aiSelectedModel,
+                        ...next,
                         updatedAt: window.firestore.serverTimestamp()
-                    });
-                    setApiKeyInput("");
-                    alert("API 키가 안전하게 등록되었습니다. (Base64 Encoded)");
-                } catch(e) {
-                    console.error(e);
-                    alert("키 저장 실패: " + e.message);
+                    };
+                    await window.firestore.setDoc(
+                        window.firestore.doc(window.db, 'artifacts', APP_ID, 'public', 'data', 'app_settings', 'ai_config'),
+                        merged,
+                        { merge: true }
+                    );
+                } finally {
+                    setIsSavingAiConfig(false);
                 }
             };
 
+            const handleSaveApiKey = async () => {
+                const key = String(aiApiKeyInput || '').trim();
+                if (!key) return alert("API 키를 입력해주세요.");
+                await saveAiSettings({ apiKey: key });
+                alert("API 키가 클라우드에 저장되었습니다.");
+            };
+
+            const handleSearchModels = async () => {
+                const key = String(aiApiKeyInput || aiConfig?.apiKey || '').trim();
+                if (!key) return alert("먼저 API 키를 입력하거나 저장해주세요.");
+                setIsSearchingModels(true);
+                try {
+                    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}`);
+                    const data = await response.json();
+                    if (data.error) throw new Error(data.error.message);
+
+                    const models = (data.models || [])
+                        .filter(m => m.supportedGenerationMethods?.includes("generateContent") && String(m.name || '').includes("gemini"))
+                        .map(m => String(m.name).replace("models/", ""))
+                        .sort();
+
+                    if (models.length === 0) throw new Error("사용 가능한 Gemini 모델을 찾을 수 없습니다.");
+
+                    const preferred = models.find(m => m.includes("1.5-flash")) || models[0];
+                    setAiModels(models);
+                    setAiSelectedModel(preferred);
+                    setAiApiKeyInput(key);
+                    await saveAiSettings({ apiKey: key, models, selectedModel: preferred });
+                    alert(`모델 검색 완료: ${models.length}개`);
+                } catch (e) {
+                    console.error(e);
+                    alert(`모델 검색 실패: ${e.message}`);
+                } finally {
+                    setIsSearchingModels(false);
+                }
+            };
+
+            const handleSelectModel = async (model) => {
+                setAiSelectedModel(model);
+                await saveAiSettings({ selectedModel: model });
+            };
+
+            const handleResetAiSettings = async () => {
+                if (!confirm("저장된 API 키 및 모델 설정을 초기화하시겠습니까?")) return;
+                setAiApiKeyInput("");
+                setAiModels([]);
+                setAiSelectedModel("");
+                await saveAiSettings({ apiKey: "", models: [], selectedModel: "" });
+                alert("AI 설정이 초기화되었습니다.");
+            };
+
             return (
-                <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-6 fade-in max-w-4xl space-y-10">
-                    
-                    {/* Security Section */}
-                    <div className="border-b pb-8">
-                         <h2 className="text-lg font-bold mb-4 flex items-center gap-2"><Icon name="shield-check" className="text-green-600"/> 시스템 보안 설정 (API Key)</h2>
-                         <div className="bg-slate-50 p-6 rounded-lg border border-slate-200">
-                            <p className="text-sm text-slate-600 mb-4">Google Gemini API 키를 등록하세요. 키는 <strong>Base64로 변환(인코딩)</strong>되어 데이터베이스에 저장되며, 코드에 직접 노출되지 않습니다.</p>
-                            <div className="flex gap-2">
-                                <input 
-                                    type="password" 
-                                    value={apiKeyInput} 
-                                    onChange={(e) => setApiKeyInput(e.target.value)}
-                                    placeholder="AIzaSy..." 
-                                    className="flex-1 border p-3 rounded-lg text-sm bg-white" 
+                <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-6 fade-in max-w-4xl">
+                    <div className="mb-8 border-b pb-6">
+                        <h2 className="text-lg font-bold mb-4">Google AI 설정</h2>
+                        <div className="bg-indigo-50 border border-indigo-100 rounded-lg p-4 mb-4">
+                            <p className="text-xs text-indigo-700 font-bold">저장 위치: 클라우드(Firestore)</p>
+                            <p className="text-xs text-indigo-600 mt-1">관리자 설정 메뉴에서 등록/수정 시 모든 관리자 화면에 동기화됩니다.</p>
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                            <div className="md:col-span-2">
+                                <label className="block text-xs text-slate-500 mb-1">Google AI API Key</label>
+                                <input
+                                    type="password"
+                                    value={aiApiKeyInput}
+                                    onChange={e => setAiApiKeyInput(e.target.value)}
+                                    placeholder="AIza..."
+                                    className="w-full border p-2.5 rounded text-sm"
                                 />
-                                <button onClick={saveApiKey} className="bg-slate-800 text-white px-6 py-3 rounded-lg font-bold hover:bg-slate-900 transition shadow-lg shadow-slate-300">
-                                    키 등록/갱신
+                            </div>
+                            <div className="flex items-end">
+                                <button onClick={handleSaveApiKey} disabled={isSavingAiConfig} className="w-full bg-indigo-600 text-white px-4 py-2.5 rounded font-bold hover:bg-indigo-700 disabled:bg-slate-400">
+                                    {isSavingAiConfig ? "저장 중..." : "API 키 저장"}
                                 </button>
                             </div>
-                            <p className="text-xs text-slate-400 mt-2">* 이미 등록된 키가 있다면 덮어씌워집니다.</p>
-                         </div>
+                        </div>
+                        <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+                            <div className="md:col-span-2">
+                                <label className="block text-xs text-slate-500 mb-1">AI 모델 선택</label>
+                                <select
+                                    value={aiSelectedModel}
+                                    onChange={e => handleSelectModel(e.target.value)}
+                                    className="w-full border p-2.5 rounded text-sm bg-white"
+                                    disabled={aiModels.length === 0}
+                                >
+                                    <option value="">{aiModels.length === 0 ? "모델을 검색해주세요" : "모델 선택"}</option>
+                                    {aiModels.map(model => <option key={model} value={model}>{model}</option>)}
+                                </select>
+                            </div>
+                            <div className="space-y-2">
+                                <button onClick={handleSearchModels} disabled={isSearchingModels} className="w-full bg-blue-600 text-white px-4 py-2 rounded font-bold hover:bg-blue-700 disabled:bg-slate-400">
+                                    {isSearchingModels ? "검색 중..." : "모델 자동 검색"}
+                                </button>
+                                <button onClick={handleResetAiSettings} className="w-full bg-slate-100 text-slate-700 px-4 py-2 rounded font-bold hover:bg-slate-200">
+                                    AI 설정 초기화
+                                </button>
+                            </div>
+                        </div>
                     </div>
-
-                    <div className="border-b pb-8">
+                    <div className="mb-8 border-b pb-6">
                         <h2 className="text-lg font-bold mb-4">자동화 도구</h2>
                         <div className="flex flex-col md:flex-row gap-4">
                             <div className="bg-blue-50 p-4 rounded-lg flex-1 flex flex-col justify-center">
@@ -1028,23 +1336,19 @@
                             </div>
                         </div>
                     </div>
-
-                    <div>
-                        <h2 className="text-lg font-bold mb-6">KPI 수동 보정 ({currentPeriod})</h2>
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
-                            {Object.entries(form).map(([key, data]) => (
-                                <div key={key} className="bg-slate-50 p-4 rounded-lg border border-slate-200">
-                                    <h3 className="text-sm font-bold text-slate-700 mb-3 uppercase">{data.label}</h3>
-                                    <div className="grid grid-cols-2 gap-4">
-                                        <div><label className="text-xs text-slate-500">값</label><input value={data.value} onChange={e => handleMetricChange(key, 'value', e.target.value)} className="w-full border p-2 rounded text-sm" /></div>
-                                        <div><label className="text-xs text-slate-500">변화량</label><input value={data.diff} onChange={e => handleMetricChange(key, 'diff', e.target.value)} className="w-full border p-2 rounded text-sm" /></div>
-                                    </div>
+                    <h2 className="text-lg font-bold mb-6">KPI 수동 보정 ({currentPeriod})</h2>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+                        {Object.entries(form).map(([key, data]) => (
+                            <div key={key} className="bg-slate-50 p-4 rounded-lg border border-slate-200">
+                                <h3 className="text-sm font-bold text-slate-700 mb-3 uppercase">{data.label}</h3>
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div><label className="text-xs text-slate-500">값</label><input value={data.value} onChange={e => handleMetricChange(key, 'value', e.target.value)} className="w-full border p-2 rounded text-sm" /></div>
+                                    <div><label className="text-xs text-slate-500">변화량</label><input value={data.diff} onChange={e => handleMetricChange(key, 'diff', e.target.value)} className="w-full border p-2 rounded text-sm" /></div>
                                 </div>
-                            ))}
-                        </div>
-                        <button onClick={save} className="bg-slate-800 text-white px-6 py-3 rounded-lg font-bold">저장</button>
+                            </div>
+                        ))}
                     </div>
-
+                    <button onClick={save} className="bg-slate-800 text-white px-6 py-3 rounded-lg font-bold">저장</button>
                     <div className="mt-10 border-t pt-6">
                         <h2 className="text-lg font-bold mb-4">연도 설정</h2>
                         <div className="flex gap-2"><input value={newYear} onChange={e => setNewYear(e.target.value)} placeholder="예: 2028" className="border p-2 rounded w-32" /><button onClick={addYear} className="bg-green-600 text-white px-4 py-2 rounded font-bold">추가</button></div>
@@ -1083,7 +1387,7 @@
                         md:translate-x-0 no-print
                     `}>
                         <div className="h-16 flex items-center px-6 border-b border-slate-100 justify-between">
-                            <span className="font-bold text-lg text-slate-800">OrgPulse</span>
+                            <span className="font-bold text-lg text-slate-800">대나무숲</span>
                             <button onClick={() => setIsMobileMenuOpen(false)} className="md:hidden text-slate-500">
                                 <Icon name="x" size={24} />
                             </button>
@@ -1128,6 +1432,7 @@
             const [globalMetrics, setGlobalMetrics] = useState(defaultMetrics);
             const [chartData, setChartData] = useState({ trend: [] });
             const [teamStats, setTeamStats] = useState([]);
+            const [aiConfig, setAiConfig] = useState({ keyStorageMode: 'cloud', apiKey: '', models: [], selectedModel: '' });
 
             useEffect(() => {
                 const initAuth = async () => {
@@ -1166,7 +1471,18 @@
                     if (s.exists()) setChartData(s.data());
                     else window.firestore.setDoc(chartRef, { trend: [] }); 
                 });
-                return () => { unsubMetrics(); unsubTeams(); unsubChart(); };
+                const aiConfigRef = window.firestore.doc(window.db, 'artifacts', APP_ID, 'public', 'data', 'app_settings', 'ai_config');
+                const unsubAiConfig = window.firestore.onSnapshot(aiConfigRef, (s) => {
+                    if (!s.exists()) return;
+                    const data = s.data();
+                    setAiConfig({
+                        keyStorageMode: data?.keyStorageMode || 'cloud',
+                        apiKey: data?.apiKey || '',
+                        models: Array.isArray(data?.models) ? data.models : [],
+                        selectedModel: data?.selectedModel || ''
+                    });
+                });
+                return () => { unsubMetrics(); unsubTeams(); unsubChart(); unsubAiConfig(); };
             }, [currentPeriod, user]);
             
             const handleAdminSuccess = () => { setRole('admin'); };
@@ -1214,9 +1530,9 @@
                         
                         {role === 'admin' && currentView === 'dashboard' && <DashboardView globalMetrics={globalMetrics} chartData={chartData} teamStats={teamStats} currentPeriod={currentPeriod} user={user} />}
                         {role === 'admin' && currentView === 'teams' && <TeamManagementView teamStats={teamStats} currentPeriod={currentPeriod} />}
-                        {role === 'admin' && currentView === 'analysis' && <AnalysisView teamStats={teamStats} globalMetrics={globalMetrics} />}
+                        {role === 'admin' && currentView === 'analysis' && <AnalysisView teamStats={teamStats} globalMetrics={globalMetrics} chartData={chartData} currentPeriod={currentPeriod} aiConfig={aiConfig} />}
                         {role === 'admin' && currentView === 'data' && <DataManagementView teamStats={teamStats} currentPeriod={currentPeriod} />}
-                        {role === 'admin' && currentView === 'settings' && <SettingsView globalMetrics={globalMetrics} chartData={chartData} availableYears={availableYears} setAvailableYears={setAvailableYears} currentPeriod={currentPeriod} teamStats={teamStats} />}
+                        {role === 'admin' && currentView === 'settings' && <SettingsView globalMetrics={globalMetrics} chartData={chartData} availableYears={availableYears} setAvailableYears={setAvailableYears} currentPeriod={currentPeriod} teamStats={teamStats} aiConfig={aiConfig} />}
                         {role === 'admin' && currentView === 'report' && <ReportView globalMetrics={globalMetrics} teamStats={teamStats} />}
 
                         {showAdminLogin && <AdminLoginModal onClose={() => setShowAdminLogin(false)} onSuccess={handleAdminSuccess} />}
