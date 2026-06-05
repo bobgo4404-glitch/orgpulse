@@ -136,6 +136,25 @@
 
         const getFormattedPeriod = (year, month) => `${year}-${String(month).padStart(2, '0')}`;
 
+        const PULSE_FIELDS = [
+            { id: 'workload', label: '업무부하', desc: '업무량과 마감이 감당 가능한 수준입니다.' },
+            { id: 'relationship', label: '협업관계', desc: '동료와의 협업과 소통이 원활합니다.' },
+            { id: 'leadership', label: '리더십', desc: '리더가 방향, 우선순위, 피드백을 명확히 제공합니다.' },
+            { id: 'safety', label: '심리적 안전감', desc: '불이익 걱정 없이 의견이나 문제를 말할 수 있습니다.' },
+            { id: 'growth', label: '성장감', desc: '현재 업무가 역량 성장과 커리어에 도움이 됩니다.' },
+            { id: 'fairness', label: '공정성', desc: '평가, 보상, 업무배분이 공정하다고 느낍니다.' },
+            { id: 'clarity', label: '역할명확성', desc: '내 역할과 목표, 업무 우선순위가 명확합니다.' },
+            { id: 'engagement', label: '몰입/추천의향', desc: '이 조직에서 계속 일하고 싶고 지인에게 추천할 수 있습니다.' }
+        ];
+
+        const DEFAULT_SURVEY_DATA = PULSE_FIELDS.reduce((acc, field) => ({ ...acc, [field.id]: "3" }), { teamId: "", keywords: "" });
+        const getPulseScore = (data, key) => {
+            const parsed = Number(data?.[key]);
+            return Number.isFinite(parsed) && parsed > 0 ? parsed : 3;
+        };
+        const scoreToPercent = (score) => Math.round(((score - 1) / 4) * 100);
+        const scoreToRiskPercent = (score) => Math.round(((5 - score) / 4) * 100);
+
         // --- Shared Logic for Auto Calculation ---
         const calculatePeriodStats = async (db, period, teamsList, silent = false) => {
             const { collection, query, where, getDocs, getDoc, doc, setDoc, updateDoc, serverTimestamp } = window.firestore;
@@ -175,6 +194,8 @@
                             workload: '적정',
                             conflict: '낮음',
                             leadership: '보통',
+                            diagnosisScores: {},
+                            diagnosisDrivers: [],
                             keywords: [],
                             calculatedAt: serverTimestamp()
                         })
@@ -185,25 +206,21 @@
                     return;
                 }
 
-                let totalW = 0, totalR = 0, totalL = 0;
+                const totals = PULSE_FIELDS.reduce((acc, field) => ({ ...acc, [field.id]: 0 }), {});
                 currentDocs.forEach(d => {
                     const data = d.data();
-                    totalW += data.workload || 3;
-                    totalR += data.relationship || 3;
-                    totalL += data.leadership || 3;
+                    PULSE_FIELDS.forEach(field => {
+                        totals[field.id] += getPulseScore(data, field.id);
+                    });
                 });
                 const count = currentDocs.length;
-                
-                const avgW = totalW / count;
-                const avgR = totalR / count;
-                const avgL = totalL / count;
-                const overallAvg = (avgW + avgR + avgL) / 3;
 
-                const burnout = Math.round((avgW / 5) * 100);
-                const safety = avgR.toFixed(1);
-                const growth = Math.round((avgL / 5) * 100);
+                const averages = PULSE_FIELDS.reduce((acc, field) => ({ ...acc, [field.id]: totals[field.id] / count }), {});
+                const burnout = scoreToRiskPercent(averages.workload);
+                const safety = averages.safety.toFixed(1);
+                const growth = scoreToPercent(averages.growth);
                 
-                let enps = Math.round((overallAvg - 3) * 50);
+                let enps = Math.round((averages.engagement - 3) * 50);
                 let enpsStr = String(enps);
                 if(enps > 0) enpsStr = "+" + enps;
 
@@ -234,21 +251,26 @@
                             workload: '적정',
                             conflict: '낮음',
                             leadership: '보통',
+                            diagnosisScores: {},
+                            diagnosisDrivers: [],
                             keywords: [],
                             calculatedAt: serverTimestamp()
                         });
                         return;
                     }
 
-                    let tw=0, tr=0, tl=0;
+                    const teamTotals = PULSE_FIELDS.reduce((acc, field) => ({ ...acc, [field.id]: 0 }), {});
                     teamResponses.forEach(d => {
                         const dat = d.data();
-                        tw += dat.workload||0; tr += dat.relationship||0; tl += dat.leadership||0;
+                        PULSE_FIELDS.forEach(field => {
+                            teamTotals[field.id] += getPulseScore(dat, field.id);
+                        });
                     });
                     const tc = teamResponses.length;
-                    const tAvgW = tw/tc;
-                    const tAvgR = tr/tc;
-                    const tAvgL = tl/tc;
+                    const diagnosisScores = PULSE_FIELDS.reduce((acc, field) => ({
+                        ...acc,
+                        [field.id]: Number((teamTotals[field.id] / tc).toFixed(1))
+                    }), {});
                     const teamKeywords = [...new Set(
                         teamResponses
                             .flatMap(d => String(d.data().keywords || '').split(','))
@@ -256,14 +278,31 @@
                             .filter(Boolean)
                     )];
 
+                    const diagnosisDrivers = [];
+                    if (diagnosisScores.workload <= 2.5) diagnosisDrivers.push('업무부하');
+                    if (diagnosisScores.relationship <= 2.5) diagnosisDrivers.push('협업관계');
+                    if (diagnosisScores.leadership <= 2.5) diagnosisDrivers.push('리더십');
+                    if (diagnosisScores.safety <= 2.5) diagnosisDrivers.push('심리적 안전감');
+                    if (diagnosisScores.growth <= 2.5) diagnosisDrivers.push('성장감');
+                    if (diagnosisScores.fairness <= 2.5) diagnosisDrivers.push('공정성');
+                    if (diagnosisScores.clarity <= 2.5) diagnosisDrivers.push('역할명확성');
+                    if (diagnosisScores.engagement <= 2.5) diagnosisDrivers.push('몰입/추천의향');
+
                     let newStatus = '양호';
-                    if (tAvgW >= 4.0 || tAvgR <= 2.5 || tAvgL <= 2.5) newStatus = '위험';
+                    if (diagnosisDrivers.length >= 3 || diagnosisScores.engagement <= 2.2) newStatus = '심각';
+                    else if (diagnosisDrivers.length > 0) newStatus = '위험';
 
                     await updateDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'team_stats', team.id), {
                         status: newStatus,
-                        workload: tAvgW >= 4.0 ? '과부하' : '적정',
-                        conflict: tAvgR <= 2.5 ? '높음' : '낮음',
-                        leadership: tAvgL <= 2.5 ? '부족' : '보통',
+                        workload: diagnosisScores.workload <= 2.5 ? '과부하' : '적정',
+                        conflict: diagnosisScores.relationship <= 2.5 ? '높음' : '낮음',
+                        leadership: diagnosisScores.leadership <= 2.5 ? '부족' : '보통',
+                        safetyStatus: diagnosisScores.safety <= 2.5 ? '낮음' : '양호',
+                        growthStatus: diagnosisScores.growth <= 2.5 ? '정체' : '양호',
+                        fairnessStatus: diagnosisScores.fairness <= 2.5 ? '주의' : '양호',
+                        clarityStatus: diagnosisScores.clarity <= 2.5 ? '불명확' : '양호',
+                        diagnosisScores,
+                        diagnosisDrivers,
                         keywords: teamKeywords,
                         calculatedAt: serverTimestamp()
                     });
@@ -368,9 +407,96 @@
             );
         };
 
+        const COMPLAINT_CATEGORIES = [
+            { value: "workload", label: "업무량/근로시간" },
+            { value: "leadership", label: "상급자/리더십" },
+            { value: "relationship", label: "동료관계/조직문화" },
+            { value: "harassment", label: "직장 내 괴롭힘 의심" },
+            { value: "sexual", label: "성희롱/차별 가능성" },
+            { value: "safety", label: "안전/건강 위험" },
+            { value: "pay", label: "임금/보상/평가" },
+            { value: "other", label: "기타" }
+        ];
+
+        const URGENCY_OPTIONS = [
+            { value: "low", label: "낮음" },
+            { value: "normal", label: "보통" },
+            { value: "high", label: "높음" },
+            { value: "critical", label: "긴급" }
+        ];
+
+        const CASE_STATUS_OPTIONS = ["접수", "검토중", "조사중", "조치중", "종결", "보류"];
+
+        const getTeamName = (teamStats, teamId) => {
+            const team = (teamStats || []).find(t => t.id === teamId);
+            return team ? team.name : "미지정";
+        };
+
+        const getCategoryLabel = (value) => COMPLAINT_CATEGORIES.find(c => c.value === value)?.label || value || "-";
+        const getUrgencyLabel = (value) => URGENCY_OPTIONS.find(u => u.value === value)?.label || value || "-";
+
+        const formatDateTime = (value) => {
+            if (!value) return "-";
+            if (value.seconds) return new Date(value.seconds * 1000).toLocaleString();
+            return String(value);
+        };
+
+        const assessComplaintRisk = (data) => {
+            const flags = [];
+            let score = 0;
+            if (["harassment", "sexual", "safety"].includes(data.category)) {
+                score += 35;
+                flags.push("법정/보호조치 검토 필요");
+            }
+            if (data.urgency === "critical") {
+                score += 35;
+                flags.push("긴급 대응");
+            } else if (data.urgency === "high") {
+                score += 20;
+                flags.push("우선 검토");
+            }
+            if (data.protectionRequest === "yes") {
+                score += 25;
+                flags.push("보호조치 요청");
+            }
+            if (String(data.details || "").length >= 300) {
+                score += 5;
+                flags.push("상세 진술");
+            }
+            const riskLevel = score >= 70 ? "high" : score >= 35 ? "medium" : "low";
+            return { riskScore: score, riskLevel, riskFlags: flags };
+        };
+
+        const RiskBadge = ({ level }) => {
+            const map = {
+                high: "bg-red-100 text-red-700 border-red-200",
+                medium: "bg-orange-100 text-orange-700 border-orange-200",
+                low: "bg-green-100 text-green-700 border-green-200"
+            };
+            const label = level === "high" ? "높음" : level === "medium" ? "보통" : "낮음";
+            return <span className={`px-2.5 py-1 rounded-full text-xs font-bold border ${map[level] || map.low}`}>리스크 {label}</span>;
+        };
+
         const SurveyView = ({ teamStats, currentPeriod }) => {
-            const [surveyData, setSurveyData] = useState({ teamId: "", workload: "3", relationship: "3", leadership: "3", keywords: "" });
-            const [submitted, setSubmitted] = useState(false);
+            const [activeTab, setActiveTab] = useState("complaint");
+            const [surveyData, setSurveyData] = useState({ ...DEFAULT_SURVEY_DATA });
+            const [complaintData, setComplaintData] = useState({
+                reporterMode: "anonymous",
+                reporterName: "",
+                contact: "",
+                teamId: "",
+                category: "workload",
+                urgency: "normal",
+                incidentDate: "",
+                relatedParty: "",
+                subject: "",
+                details: "",
+                desiredAction: "",
+                protectionRequest: "no",
+                allowContact: "no",
+                privacyConsent: false
+            });
+            const [submitted, setSubmitted] = useState(null);
             const [keywordInput, setKeywordInput] = useState("");
             const keywordList = useMemo(() => {
                 const items = String(surveyData.keywords || "")
@@ -396,123 +522,302 @@
                 setKeywordList(keywordList.filter(k => k !== target));
             };
 
-            const handleSubmit = async (e) => {
+            const handleSurveySubmit = async (e) => {
                 e.preventDefault();
                 if(!surveyData.teamId) return alert("소속 팀을 선택해주세요.");
                 try {
                     await window.firestore.addDoc(window.firestore.collection(window.db, 'artifacts', APP_ID, 'public', 'data', 'survey_responses'), {
                         teamId: surveyData.teamId,
                         period: currentPeriod, 
-                        workload: Number(surveyData.workload),
-                        relationship: Number(surveyData.relationship),
-                        leadership: Number(surveyData.leadership),
+                        ...PULSE_FIELDS.reduce((acc, field) => ({ ...acc, [field.id]: Number(surveyData[field.id]) }), {}),
                         keywords: surveyData.keywords, // Added to save raw keywords with response
                         createdAt: window.firestore.serverTimestamp()
                     });
 
                     await calculatePeriodStats(window.db, currentPeriod, teamStats, true); 
 
-                    setSubmitted(true);
+                    setSubmitted({ type: "survey" });
                 } catch(e) { console.error(e); alert("제출 오류: " + e.message); }
+            };
+
+            const resetComplaintForm = () => {
+                setComplaintData({
+                    reporterMode: "anonymous",
+                    reporterName: "",
+                    contact: "",
+                    teamId: "",
+                    category: "workload",
+                    urgency: "normal",
+                    incidentDate: "",
+                    relatedParty: "",
+                    subject: "",
+                    details: "",
+                    desiredAction: "",
+                    protectionRequest: "no",
+                    allowContact: "no",
+                    privacyConsent: false
+                });
+            };
+
+            const handleComplaintSubmit = async (e) => {
+                e.preventDefault();
+                if (!complaintData.teamId) return alert("소속 부서를 선택해주세요.");
+                if (!complaintData.subject.trim()) return alert("제목을 입력해주세요.");
+                if (!complaintData.details.trim()) return alert("상세 내용을 입력해주세요.");
+                if (complaintData.reporterMode === "named" && !complaintData.reporterName.trim()) return alert("기명 접수 시 성명을 입력해주세요.");
+                if (!complaintData.privacyConsent) return alert("개인정보 수집·이용 안내 확인이 필요합니다.");
+
+                const caseNo = `GC-${currentPeriod.replace("-", "")}-${Date.now().toString().slice(-6)}`;
+                const risk = assessComplaintRisk(complaintData);
+                const payload = {
+                    ...complaintData,
+                    caseNo,
+                    period: currentPeriod,
+                    teamNameSnapshot: getTeamName(teamStats, complaintData.teamId),
+                    status: "접수",
+                    handler: "",
+                    adminMemo: "",
+                    outcome: "",
+                    riskScore: risk.riskScore,
+                    riskLevel: risk.riskLevel,
+                    riskFlags: risk.riskFlags,
+                    history: [
+                        { at: new Date().toISOString(), actor: "구성원", action: "고충 접수", note: "신규 접수" }
+                    ],
+                    createdAt: window.firestore.serverTimestamp(),
+                    updatedAt: window.firestore.serverTimestamp()
+                };
+                try {
+                    await window.firestore.addDoc(
+                        window.firestore.collection(window.db, 'artifacts', APP_ID, 'public', 'data', 'complaint_cases'),
+                        payload
+                    );
+                    setSubmitted({ type: "complaint", caseNo, riskLevel: risk.riskLevel });
+                    resetComplaintForm();
+                } catch(e) {
+                    console.error(e);
+                    alert("접수 오류: " + e.message);
+                }
             };
 
             if(submitted) return (
                 <div className="flex flex-col items-center justify-center h-full p-8 text-center animate-fade-in">
                     <div className="w-16 h-16 bg-green-100 text-green-600 rounded-full flex items-center justify-center mb-4"><Icon name="check" size={32} className="text-green-600" /></div>
-                    <h2 className="text-2xl font-bold text-slate-800 mb-2">제출 완료</h2>
-                    <p className="text-slate-500 mb-6">소중한 의견이 안전하게 저장되었습니다.</p>
-                    <button onClick={() => { setSubmitted(false); setSurveyData({ teamId: "", workload: "3", relationship: "3", leadership: "3", keywords: "" }); setKeywordInput(""); }} className="text-blue-600 font-bold hover:underline">추가 제출하기</button>
+                    <h2 className="text-2xl font-bold text-slate-800 mb-2">{submitted.type === "complaint" ? "접수 완료" : "제출 완료"}</h2>
+                    <p className="text-slate-500 mb-2">{submitted.type === "complaint" ? "고충·의견이 관리자 처리함에 접수되었습니다." : "소중한 의견이 안전하게 저장되었습니다."}</p>
+                    {submitted.type === "complaint" && <p className="text-sm font-bold text-slate-700 mb-6">접수번호: {submitted.caseNo}</p>}
+                    <button onClick={() => { setSubmitted(null); setSurveyData({ ...DEFAULT_SURVEY_DATA }); setKeywordInput(""); }} className="text-blue-600 font-bold hover:underline">추가 작성하기</button>
                 </div>
             );
 
             return (
-                <div className="max-w-3xl mx-auto bg-white rounded-2xl shadow-md border border-slate-100 p-4 md:p-8 animate-fade-in my-4 md:my-10">
-                    <div className="text-center mb-6 md:mb-8">
-                        <h1 className="text-xl md:text-2xl font-bold text-slate-800">주간 조직 진단 (Weekly Pulse Survey)</h1>
-                        <p className="text-xs md:text-sm text-slate-400 mt-2">5점 척도로 선택하고, 키워드는 태그로 빠르게 추가하세요.</p>
-                    </div>
-                    <form onSubmit={handleSubmit} className="space-y-7 pb-20 md:pb-0">
-                        <div>
-                            <label className="block text-sm font-bold text-slate-700 mb-2">소속 부서</label>
-                            <select value={surveyData.teamId} onChange={e => setSurveyData({...surveyData, teamId: e.target.value})} className="w-full px-4 py-3 border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-200" required>
-                                <option value="">부서를 선택해주세요</option>
-                                {teamStats.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-                            </select>
-                        </div>
-                        <div className="space-y-4">
-                            {[{ id: 'workload', label: '업무량' }, { id: 'relationship', label: '동료 관계' }, { id: 'leadership', label: '리더십' }].map(f => (
-                                <div key={f.id} className="bg-slate-50 p-5 rounded-xl border border-slate-100 shadow-sm">
-                                    <div className="flex items-center justify-between mb-3">
-                                        <label className="block text-base font-extrabold text-slate-800">{f.label}</label>
-                                        <span className="text-sm font-bold text-blue-700 bg-blue-50 px-2.5 py-1 rounded-full">{surveyData[f.id]}점</span>
-                                    </div>
-                                    <p className="text-xs text-slate-400 mb-3">가장 가까운 상태를 선택하세요.</p>
-                                    <div className="flex gap-2 overflow-x-auto pb-1">
-                                        {[1, 2, 3, 4, 5].map(num => {
-                                            const selected = String(surveyData[f.id]) === String(num);
-                                            const levelLabel = ['매우 낮음', '낮음', '보통', '좋음', '매우 좋음'][num - 1];
-                                            const selectedTone = num <= 2
-                                                ? 'border-rose-500 bg-rose-500 text-white shadow-rose-200'
-                                                : num === 3
-                                                    ? 'border-amber-500 bg-amber-500 text-white shadow-amber-200'
-                                                    : 'border-emerald-500 bg-emerald-500 text-white shadow-emerald-200';
-                                            return (
-                                                <button
-                                                    key={num}
-                                                    type="button"
-                                                    onClick={() => setSurveyData({ ...surveyData, [f.id]: String(num) })}
-                                                    className={`min-w-[88px] rounded-xl border px-3 py-3 text-center transition-all ${
-                                                        selected
-                                                            ? `${selectedTone} shadow-md`
-                                                            : 'border-slate-200 bg-white text-slate-600 hover:border-blue-300 hover:bg-blue-50'
-                                                    }`}
-                                                    aria-label={`${f.label} ${num}점`}
-                                                >
-                                                    <div className={`text-lg font-black ${selected ? 'text-white' : 'text-slate-800'}`}>{num}</div>
-                                                    <div className={`mt-1 text-[11px] font-semibold ${selected ? 'text-white/90' : 'text-slate-400'}`}>{levelLabel}</div>
-                                                </button>
-                                            );
-                                        })}
-                                    </div>
-                                </div>
-                            ))}
-                        </div>
-                        <div>
-                            <label className="block text-sm font-bold text-slate-700 mb-3">키워드 태그</label>
-                            <div className="w-full px-4 py-4 border border-slate-200 rounded-xl bg-white">
-                                <div className="flex flex-wrap gap-2.5 mb-3 min-h-10 items-center">
-                                    {keywordList.length === 0 && <span className="text-sm text-slate-400">예: 소통 부재, 야근, 협업 개선</span>}
-                                    {keywordList.map((tag) => (
-                                        <span key={tag} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-blue-50 text-blue-700 text-sm font-semibold border border-blue-100">
-                                            {tag}
-                                            <button type="button" className="text-blue-500 hover:text-blue-700" onClick={() => removeKeyword(tag)} aria-label={`${tag} 삭제`}>
-                                                <Icon name="x" size={12} />
-                                            </button>
-                                        </span>
-                                    ))}
-                                </div>
-                                <input
-                                    type="text"
-                                    placeholder="입력 후 Enter 또는 쉼표(,)로 추가"
-                                    value={keywordInput}
-                                    onChange={e => setKeywordInput(e.target.value)}
-                                    onKeyDown={e => {
-                                        if (e.key === 'Enter' || e.key === ',') {
-                                            e.preventDefault();
-                                            addKeywordFromInput();
-                                        } else if (e.key === 'Backspace' && !keywordInput && keywordList.length > 0) {
-                                            removeKeyword(keywordList[keywordList.length - 1]);
-                                        }
-                                    }}
-                                    onBlur={addKeywordFromInput}
-                                    className="w-full px-2 py-2.5 text-base outline-none"
-                                />
+                <div className="max-w-4xl mx-auto animate-fade-in my-4 md:my-8">
+                    <div className="bg-white rounded-2xl shadow-md border border-slate-100 p-4 md:p-8">
+                        <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-4 mb-6">
+                            <div>
+                                <h1 className="text-xl md:text-2xl font-bold text-slate-800">고충·의견 접수</h1>
+                                <p className="text-xs md:text-sm text-slate-500 mt-2">접수 내용은 목적 범위 내에서만 확인하며, 조사·보호조치가 필요한 경우 추가 확인이 필요할 수 있습니다.</p>
+                            </div>
+                            <div className="grid grid-cols-2 gap-1 bg-slate-100 p-1 rounded-xl md:w-[280px]">
+                                <button type="button" onClick={() => setActiveTab("complaint")} className={`py-2 rounded-lg text-sm font-bold transition ${activeTab === "complaint" ? "bg-white text-blue-700 shadow-sm" : "text-slate-500 hover:text-slate-800"}`}>고충 접수</button>
+                                <button type="button" onClick={() => setActiveTab("pulse")} className={`py-2 rounded-lg text-sm font-bold transition ${activeTab === "pulse" ? "bg-white text-blue-700 shadow-sm" : "text-slate-500 hover:text-slate-800"}`}>조직 진단</button>
                             </div>
                         </div>
-                        <div className="sticky bottom-0 -mx-4 px-4 py-3 bg-white/95 backdrop-blur border-t border-slate-100 md:static md:mx-0 md:px-0 md:py-0 md:bg-transparent md:border-0">
-                            <button type="submit" className="w-full bg-blue-600 text-white py-4 rounded-xl font-bold hover:bg-blue-700 transition shadow-lg shadow-blue-200">익명 제출</button>
-                        </div>
-                    </form>
+
+                        {activeTab === "complaint" && (
+                            <form onSubmit={handleComplaintSubmit} className="space-y-6 pb-20 md:pb-0">
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <div>
+                                        <label className="block text-sm font-bold text-slate-700 mb-2">접수 방식</label>
+                                        <div className="grid grid-cols-2 gap-2">
+                                            {[{ value: "anonymous", label: "익명" }, { value: "named", label: "기명" }].map(opt => (
+                                                <button key={opt.value} type="button" onClick={() => setComplaintData({...complaintData, reporterMode: opt.value})} className={`py-3 rounded-xl border text-sm font-bold ${complaintData.reporterMode === opt.value ? "bg-blue-600 text-white border-blue-600" : "bg-white text-slate-600 border-slate-200 hover:border-blue-300"}`}>{opt.label}</button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-bold text-slate-700 mb-2">소속 부서</label>
+                                        <select value={complaintData.teamId} onChange={e => setComplaintData({...complaintData, teamId: e.target.value})} className="w-full px-4 py-3 border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-200" required>
+                                            <option value="">부서를 선택해주세요</option>
+                                            {teamStats.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                                        </select>
+                                    </div>
+                                </div>
+
+                                {complaintData.reporterMode === "named" && (
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                        <div>
+                                            <label className="block text-sm font-bold text-slate-700 mb-2">성명</label>
+                                            <input value={complaintData.reporterName} onChange={e => setComplaintData({...complaintData, reporterName: e.target.value})} className="w-full px-4 py-3 border border-slate-200 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-blue-200" placeholder="성명" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-bold text-slate-700 mb-2">연락처 또는 이메일</label>
+                                            <input value={complaintData.contact} onChange={e => setComplaintData({...complaintData, contact: e.target.value})} className="w-full px-4 py-3 border border-slate-200 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-blue-200" placeholder="후속 확인 가능 연락처" />
+                                        </div>
+                                    </div>
+                                )}
+
+                                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                    <div>
+                                        <label className="block text-sm font-bold text-slate-700 mb-2">고충 유형</label>
+                                        <select value={complaintData.category} onChange={e => setComplaintData({...complaintData, category: e.target.value})} className="w-full px-4 py-3 border border-slate-200 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-blue-200">
+                                            {COMPLAINT_CATEGORIES.map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-bold text-slate-700 mb-2">긴급도</label>
+                                        <select value={complaintData.urgency} onChange={e => setComplaintData({...complaintData, urgency: e.target.value})} className="w-full px-4 py-3 border border-slate-200 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-blue-200">
+                                            {URGENCY_OPTIONS.map(u => <option key={u.value} value={u.value}>{u.label}</option>)}
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-bold text-slate-700 mb-2">발생일</label>
+                                        <input type="date" value={complaintData.incidentDate} onChange={e => setComplaintData({...complaintData, incidentDate: e.target.value})} className="w-full px-4 py-3 border border-slate-200 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-blue-200" />
+                                    </div>
+                                </div>
+
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <div>
+                                        <label className="block text-sm font-bold text-slate-700 mb-2">제목</label>
+                                        <input value={complaintData.subject} onChange={e => setComplaintData({...complaintData, subject: e.target.value})} className="w-full px-4 py-3 border border-slate-200 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-blue-200" placeholder="예: 반복 야근과 업무 배분 문제" />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-bold text-slate-700 mb-2">관련자/관련부서</label>
+                                        <input value={complaintData.relatedParty} onChange={e => setComplaintData({...complaintData, relatedParty: e.target.value})} className="w-full px-4 py-3 border border-slate-200 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-blue-200" placeholder="특정이 어렵다면 비워두세요" />
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <label className="block text-sm font-bold text-slate-700 mb-2">상세 내용</label>
+                                    <textarea value={complaintData.details} onChange={e => setComplaintData({...complaintData, details: e.target.value})} rows="7" className="w-full px-4 py-3 border border-slate-200 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-blue-200 resize-none" placeholder="발생 경위, 빈도, 영향, 이미 요청한 사항 등을 적어주세요." required />
+                                </div>
+
+                                <div>
+                                    <label className="block text-sm font-bold text-slate-700 mb-2">희망 조치</label>
+                                    <textarea value={complaintData.desiredAction} onChange={e => setComplaintData({...complaintData, desiredAction: e.target.value})} rows="3" className="w-full px-4 py-3 border border-slate-200 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-blue-200 resize-none" placeholder="예: 업무 조정, 면담, 분리 조치, 제도 개선 등" />
+                                </div>
+
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <label className="flex items-start gap-3 p-4 rounded-xl border border-slate-200 bg-slate-50 cursor-pointer">
+                                        <input type="checkbox" checked={complaintData.protectionRequest === "yes"} onChange={e => setComplaintData({...complaintData, protectionRequest: e.target.checked ? "yes" : "no"})} className="mt-1" />
+                                        <span>
+                                            <span className="block text-sm font-bold text-slate-800">보호조치 검토 요청</span>
+                                            <span className="block text-xs text-slate-500 mt-1">근무장소 변경, 분리, 유급휴가 등은 사실관계와 내부 절차에 따라 검토됩니다.</span>
+                                        </span>
+                                    </label>
+                                    <label className="flex items-start gap-3 p-4 rounded-xl border border-slate-200 bg-slate-50 cursor-pointer">
+                                        <input type="checkbox" checked={complaintData.allowContact === "yes"} onChange={e => setComplaintData({...complaintData, allowContact: e.target.checked ? "yes" : "no"})} className="mt-1" />
+                                        <span>
+                                            <span className="block text-sm font-bold text-slate-800">추가 확인 연락 동의</span>
+                                            <span className="block text-xs text-slate-500 mt-1">기명 접수 또는 연락처 기재 시에만 후속 확인이 가능합니다.</span>
+                                        </span>
+                                    </label>
+                                </div>
+
+                                <label className="flex items-start gap-3 p-4 rounded-xl border border-blue-100 bg-blue-50 cursor-pointer">
+                                    <input type="checkbox" checked={complaintData.privacyConsent} onChange={e => setComplaintData({...complaintData, privacyConsent: e.target.checked})} className="mt-1" required />
+                                    <span className="text-xs md:text-sm text-blue-900 leading-relaxed">
+                                        고충 접수·처리 목적의 개인정보 수집·이용 안내를 확인했습니다. 민감하거나 제3자를 특정할 수 있는 정보는 필요한 범위에서만 입력하며, 접수 내용은 담당자 확인·조사·조치·기록 보관 목적에 한해 사용됩니다.
+                                    </span>
+                                </label>
+
+                                <div className="sticky bottom-0 -mx-4 px-4 py-3 bg-white/95 backdrop-blur border-t border-slate-100 md:static md:mx-0 md:px-0 md:py-0 md:bg-transparent md:border-0">
+                                    <button type="submit" className="w-full bg-blue-600 text-white py-4 rounded-xl font-bold hover:bg-blue-700 transition shadow-lg shadow-blue-200">고충·의견 접수</button>
+                                </div>
+                            </form>
+                        )}
+
+                        {activeTab === "pulse" && (
+                            <div>
+                                <div className="text-center mb-6 md:mb-8">
+                                    <h2 className="text-lg md:text-xl font-bold text-slate-800">주간 조직 진단 (Weekly Pulse Survey)</h2>
+                                    <p className="text-xs md:text-sm text-slate-400 mt-2">8개 핵심 지표를 5점 척도로 진단하고, 개선 키워드는 태그로 추가하세요.</p>
+                                </div>
+                                <form onSubmit={handleSurveySubmit} className="space-y-7 pb-20 md:pb-0">
+                                    <div>
+                                        <label className="block text-sm font-bold text-slate-700 mb-2">소속 부서</label>
+                                        <select value={surveyData.teamId} onChange={e => setSurveyData({...surveyData, teamId: e.target.value})} className="w-full px-4 py-3 border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-200" required>
+                                            <option value="">부서를 선택해주세요</option>
+                                            {teamStats.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                                        </select>
+                                    </div>
+                                    <div className="space-y-4">
+                                        {PULSE_FIELDS.map(f => (
+                                            <div key={f.id} className="bg-slate-50 p-5 rounded-xl border border-slate-100 shadow-sm">
+                                                <div className="flex items-center justify-between mb-3">
+                                                    <label className="block text-base font-extrabold text-slate-800">{f.label}</label>
+                                                    <span className="text-sm font-bold text-blue-700 bg-blue-50 px-2.5 py-1 rounded-full">{surveyData[f.id]}점</span>
+                                                </div>
+                                                <p className="text-xs text-slate-400 mb-3">{f.desc}</p>
+                                                <div className="flex gap-2 overflow-x-auto pb-1">
+                                                    {[1, 2, 3, 4, 5].map(num => {
+                                                        const selected = String(surveyData[f.id]) === String(num);
+                                                        const levelLabel = ['전혀 아님', '아님', '보통', '그렇다', '매우 그렇다'][num - 1];
+                                                        const selectedTone = num <= 2
+                                                            ? 'border-rose-500 bg-rose-500 text-white shadow-rose-200'
+                                                            : num === 3
+                                                                ? 'border-amber-500 bg-amber-500 text-white shadow-amber-200'
+                                                                : 'border-emerald-500 bg-emerald-500 text-white shadow-emerald-200';
+                                                        return (
+                                                            <button
+                                                                key={num}
+                                                                type="button"
+                                                                onClick={() => setSurveyData({ ...surveyData, [f.id]: String(num) })}
+                                                                className={`min-w-[88px] rounded-xl border px-3 py-3 text-center transition-all ${
+                                                                    selected
+                                                                        ? `${selectedTone} shadow-md`
+                                                                        : 'border-slate-200 bg-white text-slate-600 hover:border-blue-300 hover:bg-blue-50'
+                                                                }`}
+                                                                aria-label={`${f.label} ${num}점`}
+                                                            >
+                                                                <div className={`text-lg font-black ${selected ? 'text-white' : 'text-slate-800'}`}>{num}</div>
+                                                                <div className={`mt-1 text-[11px] font-semibold ${selected ? 'text-white/90' : 'text-slate-400'}`}>{levelLabel}</div>
+                                                            </button>
+                                                        );
+                                                    })}
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-bold text-slate-700 mb-3">키워드 태그</label>
+                                        <div className="w-full px-4 py-4 border border-slate-200 rounded-xl bg-white">
+                                            <div className="flex flex-wrap gap-2.5 mb-3 min-h-10 items-center">
+                                                {keywordList.length === 0 && <span className="text-sm text-slate-400">예: 소통 부재, 야근, 협업 개선</span>}
+                                                {keywordList.map((tag) => (
+                                                    <span key={tag} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-blue-50 text-blue-700 text-sm font-semibold border border-blue-100">
+                                                        {tag}
+                                                        <button type="button" className="text-blue-500 hover:text-blue-700" onClick={() => removeKeyword(tag)} aria-label={`${tag} 삭제`}>
+                                                            <Icon name="x" size={12} />
+                                                        </button>
+                                                    </span>
+                                                ))}
+                                            </div>
+                                            <input
+                                                type="text"
+                                                placeholder="입력 후 Enter 또는 쉼표(,)로 추가"
+                                                value={keywordInput}
+                                                onChange={e => setKeywordInput(e.target.value)}
+                                                onKeyDown={e => {
+                                                    if (e.key === 'Enter' || e.key === ',') {
+                                                        e.preventDefault();
+                                                        addKeywordFromInput();
+                                                    } else if (e.key === 'Backspace' && !keywordInput && keywordList.length > 0) {
+                                                        removeKeyword(keywordList[keywordList.length - 1]);
+                                                    }
+                                                }}
+                                                onBlur={addKeywordFromInput}
+                                                className="w-full px-2 py-2.5 text-base outline-none"
+                                            />
+                                        </div>
+                                    </div>
+                                    <div className="sticky bottom-0 -mx-4 px-4 py-3 bg-white/95 backdrop-blur border-t border-slate-100 md:static md:mx-0 md:px-0 md:py-0 md:bg-transparent md:border-0">
+                                        <button type="submit" className="w-full bg-blue-600 text-white py-4 rounded-xl font-bold hover:bg-blue-700 transition shadow-lg shadow-blue-200">익명 제출</button>
+                                    </div>
+                                </form>
+                            </div>
+                        )}
+                    </div>
                 </div>
             );
         };
@@ -545,12 +850,17 @@
                 const keywords = Object.entries(allKeywords).map(([text, count]) => ({ text, count })).sort((a,b) => b.count - a.count);
                 return (<div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100 h-full"><h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Icon name="message-circle" size={20} className="text-purple-500" /> 구성원의 목소리 (VoE)</h3><div className="flex flex-wrap gap-2 content-start h-40 overflow-y-auto">{keywords.length === 0 ? <p className="text-sm text-slate-400 w-full text-center mt-10">등록된 키워드가 없습니다.</p> : keywords.map((k, i) => <span key={i} className="px-3 py-1.5 rounded-full text-sm font-medium border border-slate-200 bg-slate-50 text-slate-600">{k.text} <span className="text-xs opacity-50 ml-1">{k.count}</span></span>)}</div></div>);
             };
+            const ScorePill = ({ value }) => {
+                const score = Number(value);
+                const tone = score <= 2.5 ? 'bg-red-50 text-red-700 border-red-100' : score <= 3.4 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-green-50 text-green-700 border-green-100';
+                return <span className={`px-2 py-1 rounded text-xs font-bold border ${Number.isFinite(score) ? tone : 'bg-slate-50 text-slate-400 border-slate-100'}`}>{Number.isFinite(score) ? score.toFixed(1) : '-'}</span>;
+            };
 
             return (
                 <div className="space-y-6 fade-in">
                     <div className="bg-blue-50 border border-blue-100 p-3 rounded-lg text-sm text-blue-800 flex items-center gap-2 mb-4"><Icon name="calendar" size={16} /> 현재 조회 중인 데이터: <span className="font-bold">{currentPeriod}</span></div>
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6"><KPICard metric={{...globalMetrics.enps, icon: "users", color: "text-blue-600 bg-blue-50"}} /><KPICard metric={{...globalMetrics.safety, icon: "shield-check", color: "text-green-600 bg-green-50"}} /><KPICard metric={{...globalMetrics.burnout, icon: "flame", color: "text-red-600 bg-red-50", unit: "%"}} /><KPICard metric={{...globalMetrics.growth, icon: "trending-up", color: "text-purple-600 bg-purple-50", unit: "%"}} /></div>
-                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6"><div className="lg:col-span-2 bg-white rounded-xl shadow-sm border border-slate-100 p-6"><h3 className="font-bold text-slate-800 mb-6 flex items-center gap-2"><Icon name="bar-chart-2" size={20} className="text-slate-400" /> 팀별 리스크 히트맵 ({currentPeriod})</h3><div className="overflow-x-auto"><table className="w-full text-sm text-left"><thead className="bg-slate-50"><tr><th className="p-3">팀명</th><th className="p-3">업무 로드</th><th className="p-3">관계 갈등</th><th className="p-3">리더십</th><th className="p-3">상태</th></tr></thead><tbody>{teamStats.map(t => (<tr key={t.id} className="border-b"><td className="p-3">{t.name}</td><td className="p-3"><Badge type={t.workload === '과부하' ? 'critical' : 'neutral'} text={t.workload} /></td><td className="p-3"><Badge type={t.conflict === '높음' ? 'warning' : 'neutral'} text={t.conflict} /></td><td className="p-3 text-slate-500">{t.leadership}</td><td className="p-3"><span className={`w-2 h-2 rounded-full inline-block mr-2 ${t.status === '위험' ? 'bg-red-500' : 'bg-green-500'}`}></span>{t.status}</td></tr>))}</tbody></table></div></div><div className="lg:col-span-1 h-full"><ActionBoardWidget user={user} /></div></div>
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6"><div className="lg:col-span-2 bg-white rounded-xl shadow-sm border border-slate-100 p-6"><h3 className="font-bold text-slate-800 mb-6 flex items-center gap-2"><Icon name="bar-chart-2" size={20} className="text-slate-400" /> 팀별 조직진단 히트맵 ({currentPeriod})</h3><div className="overflow-x-auto"><table className="w-full text-sm text-left"><thead className="bg-slate-50"><tr><th className="p-3">팀명</th><th className="p-3">상태</th><th className="p-3">핵심 위험요인</th><th className="p-3 text-center">업무</th><th className="p-3 text-center">안전감</th><th className="p-3 text-center">성장</th><th className="p-3 text-center">몰입</th></tr></thead><tbody>{teamStats.map(t => (<tr key={t.id} className="border-b"><td className="p-3 font-medium">{t.name}</td><td className="p-3"><span className={`w-2 h-2 rounded-full inline-block mr-2 ${t.status === '심각' ? 'bg-red-600' : t.status === '위험' ? 'bg-orange-500' : 'bg-green-500'}`}></span>{t.status}</td><td className="p-3 text-slate-500">{(t.diagnosisDrivers || []).length > 0 ? t.diagnosisDrivers.join(', ') : '특이 리스크 없음'}</td><td className="p-3 text-center"><ScorePill value={t.diagnosisScores?.workload} /></td><td className="p-3 text-center"><ScorePill value={t.diagnosisScores?.safety} /></td><td className="p-3 text-center"><ScorePill value={t.diagnosisScores?.growth} /></td><td className="p-3 text-center"><ScorePill value={t.diagnosisScores?.engagement} /></td></tr>))}</tbody></table></div></div><div className="lg:col-span-1 h-full"><ActionBoardWidget user={user} /></div></div>
                     <div className="h-64"><TrendChart data={chartData.trend} /></div>
                 </div>
             );
@@ -582,7 +892,7 @@
                             <thead className="bg-slate-100"><tr><th className="border p-2">부서명</th><th className="border p-2">상태</th><th className="border p-2">이슈</th></tr></thead>
                             <tbody>
                                 {riskyTeams.length > 0 ? riskyTeams.map(t => (
-                                    <tr key={t.id}><td className="border p-2 font-bold">{t.name}</td><td className="border p-2 text-red-600">{t.status}</td><td className="border p-2">{t.workload === '과부하' ? '업무 과다' : '관계 갈등'}</td></tr>
+                                    <tr key={t.id}><td className="border p-2 font-bold">{t.name}</td><td className="border p-2 text-red-600">{t.status}</td><td className="border p-2">{(t.diagnosisDrivers || []).length > 0 ? t.diagnosisDrivers.join(', ') : (t.workload === '과부하' ? '업무 과다' : '관계 갈등')}</td></tr>
                                 )) : <tr><td colSpan="3" className="border p-4 text-center">리스크 없음</td></tr>}
                             </tbody>
                         </table>
@@ -802,20 +1112,29 @@
                 return (teamStats || []).map((team) => {
                     let riskScore = 0;
                     const drivers = [];
+                    const scores = team.diagnosisScores || {};
+                    const lowScore = (key) => Number(scores[key]) > 0 && Number(scores[key]) <= 2.5;
                     if (team.status === '심각') { riskScore += 45; drivers.push('상태 심각'); }
                     else if (team.status === '위험') { riskScore += 35; drivers.push('상태 위험'); }
                     if (team.workload === '과부하') { riskScore += 25; drivers.push('업무 과부하'); }
                     if (team.conflict === '높음') { riskScore += 20; drivers.push('관계 갈등'); }
                     if (team.leadership === '부족') { riskScore += 15; drivers.push('리더십 이슈'); }
+                    if (lowScore('safety')) { riskScore += 20; drivers.push('심리적 안전감 낮음'); }
+                    if (lowScore('fairness')) { riskScore += 15; drivers.push('공정성 낮음'); }
+                    if (lowScore('clarity')) { riskScore += 12; drivers.push('역할명확성 낮음'); }
+                    if (lowScore('growth')) { riskScore += 10; drivers.push('성장감 낮음'); }
+                    if (lowScore('engagement')) { riskScore += 15; drivers.push('몰입/추천의향 낮음'); }
                     if ((team.keywords || []).length >= 5) { riskScore += 5; drivers.push('이슈 키워드 다수'); }
-                    const riskLevel = riskScore >= 60 ? 'high' : riskScore >= 35 ? 'medium' : 'low';
-                    return { ...team, riskScore, riskLevel, drivers };
+                    const mergedDrivers = [...new Set([...(team.diagnosisDrivers || []), ...drivers])];
+                    const riskLevel = riskScore >= 70 ? 'high' : riskScore >= 35 ? 'medium' : 'low';
+                    return { ...team, riskScore, riskLevel, drivers: mergedDrivers };
                 }).sort((a, b) => b.riskScore - a.riskScore);
             }, [teamStats]);
 
             const riskyTeams = teamRiskRows.filter(t => t.riskLevel !== 'low');
             const highWorkloadTeams = teamRiskRows.filter(t => t.workload === '과부하');
             const conflictTeams = teamRiskRows.filter(t => t.conflict === '높음');
+            const fairnessClarityTeams = teamRiskRows.filter(t => (t.diagnosisScores?.fairness || 5) <= 2.5 || (t.diagnosisScores?.clarity || 5) <= 2.5);
 
             const keywordRank = useMemo(() => {
                 const counts = {};
@@ -861,6 +1180,16 @@
                     desc: `갈등 신호 팀(${conflictTeams.length}개)과 낮은 안전감(${safetyScore.toFixed(1)}점)을 고려해 팀 단위 퍼실리테이션과 1:1 코칭을 권장합니다.`,
                     action: '문화 개선',
                     priorityScore: 82
+                });
+            }
+            if (fairnessClarityTeams.length > 0) {
+                recommendations.push({
+                    type: 'warning',
+                    category: 'System',
+                    title: '공정성·역할명확성 진단 보완',
+                    desc: `${fairnessClarityTeams.slice(0, 3).map(t => t.name).join(', ')} 팀에서 공정성 또는 역할명확성 저하 신호가 있습니다. 평가 기준, 업무배분 원칙, 의사결정 권한을 문서화해 재공지하세요.`,
+                    action: '제도 보완',
+                    priorityScore: 78
                 });
             }
             if (burnoutScore >= 70 || enpsScore < 0 || trendDelta < 0) {
@@ -1069,26 +1398,28 @@
                                 <tr>
                                     <th className="p-3 border-b">일시</th>
                                     <th className="p-3 border-b">팀명</th>
-                                    <th className="p-3 border-b text-center">업무</th>
-                                    <th className="p-3 border-b text-center">관계</th>
-                                    <th className="p-3 border-b text-center">리더</th>
+                                    {PULSE_FIELDS.map(field => (
+                                        <th key={field.id} className="p-3 border-b text-center whitespace-nowrap">{field.label}</th>
+                                    ))}
                                     <th className="p-3 border-b">키워드 (Voice)</th>
                                     <th className="p-3 border-b text-center">관리</th>
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-100">
                                 {loading ? (
-                                    <tr><td colSpan="7" className="p-8 text-center text-slate-500">데이터를 불러오는 중...</td></tr>
+                                    <tr><td colSpan={PULSE_FIELDS.length + 4} className="p-8 text-center text-slate-500">데이터를 불러오는 중...</td></tr>
                                 ) : responses.length === 0 ? (
-                                    <tr><td colSpan="7" className="p-8 text-center text-slate-500">해당 기간에 등록된 데이터가 없습니다.</td></tr>
+                                    <tr><td colSpan={PULSE_FIELDS.length + 4} className="p-8 text-center text-slate-500">해당 기간에 등록된 데이터가 없습니다.</td></tr>
                                 ) : (
                                     responses.map(res => (
                                         <tr key={res.id} className="hover:bg-slate-50 transition-colors">
                                             <td className="p-3 text-slate-500 text-xs whitespace-nowrap">{res.date}</td>
                                             <td className="p-3 font-medium text-slate-800 whitespace-nowrap">{res.teamName}</td>
-                                            <td className="p-3 text-center"><span className="bg-slate-100 px-2 py-1 rounded text-xs font-bold">{res.workload}</span></td>
-                                            <td className="p-3 text-center"><span className="bg-slate-100 px-2 py-1 rounded text-xs font-bold">{res.relationship}</span></td>
-                                            <td className="p-3 text-center"><span className="bg-slate-100 px-2 py-1 rounded text-xs font-bold">{res.leadership}</span></td>
+                                            {PULSE_FIELDS.map(field => (
+                                                <td key={field.id} className="p-3 text-center">
+                                                    <span className="bg-slate-100 px-2 py-1 rounded text-xs font-bold">{res[field.id] ?? '-'}</span>
+                                                </td>
+                                            ))}
                                             <td className="p-3 text-slate-600 text-xs italic max-w-xs truncate" title={res.keywords}>{res.keywords || '-'}</td>
                                             <td className="p-3 text-center">
                                                 <button onClick={() => handleDelete(res.id)} className="text-slate-400 hover:text-red-600 transition-colors p-1" title="삭제">
@@ -1101,6 +1432,340 @@
                             </tbody>
                         </table>
                     </div>
+                </div>
+            );
+        };
+
+        const ComplaintManagementView = ({ teamStats, currentPeriod, user }) => {
+            const [cases, setCases] = useState([]);
+            const [loading, setLoading] = useState(true);
+            const [statusFilter, setStatusFilter] = useState("전체");
+            const [riskFilter, setRiskFilter] = useState("전체");
+            const [search, setSearch] = useState("");
+            const [selectedCase, setSelectedCase] = useState(null);
+            const [detailDraft, setDetailDraft] = useState({ status: "접수", handler: "", adminMemo: "", outcome: "" });
+
+            useEffect(() => {
+                if (!window.db) return;
+                setLoading(true);
+                const q = window.firestore.query(
+                    window.firestore.collection(window.db, 'artifacts', APP_ID, 'public', 'data', 'complaint_cases')
+                );
+                const unsubscribe = window.firestore.onSnapshot(q, (snapshot) => {
+                    const list = snapshot.docs
+                        .map(doc => {
+                            const rawData = doc.data();
+                            return {
+                                id: doc.id,
+                                ...rawData,
+                                teamName: rawData.teamNameSnapshot || getTeamName(teamStats, rawData.teamId),
+                                createdAtSeconds: rawData.createdAt ? rawData.createdAt.seconds : 0
+                            };
+                        })
+                        .filter(item => item.period === currentPeriod);
+                    list.sort((a, b) => b.createdAtSeconds - a.createdAtSeconds);
+                    setCases(list);
+                    setLoading(false);
+                }, (error) => {
+                    console.error("Error fetching complaint cases:", error);
+                    setLoading(false);
+                });
+                return () => unsubscribe();
+            }, [currentPeriod, teamStats]);
+
+            const openCase = (item) => {
+                setSelectedCase(item);
+                setDetailDraft({
+                    status: item.status || "접수",
+                    handler: item.handler || "",
+                    adminMemo: item.adminMemo || "",
+                    outcome: item.outcome || ""
+                });
+            };
+
+            const filteredCases = useMemo(() => {
+                const keyword = search.trim().toLowerCase();
+                return cases.filter(item => {
+                    if (statusFilter !== "전체" && item.status !== statusFilter) return false;
+                    if (riskFilter !== "전체" && item.riskLevel !== riskFilter) return false;
+                    if (!keyword) return true;
+                    const haystack = [
+                        item.caseNo,
+                        item.subject,
+                        item.details,
+                        item.teamName,
+                        getCategoryLabel(item.category),
+                        item.relatedParty,
+                        item.handler
+                    ].join(" ").toLowerCase();
+                    return haystack.includes(keyword);
+                });
+            }, [cases, statusFilter, riskFilter, search]);
+
+            const stats = useMemo(() => ({
+                total: cases.length,
+                open: cases.filter(c => c.status !== "종결").length,
+                high: cases.filter(c => c.riskLevel === "high").length,
+                protection: cases.filter(c => c.protectionRequest === "yes").length
+            }), [cases]);
+
+            const appendHistory = (item, action, note) => {
+                const history = Array.isArray(item.history) ? item.history : [];
+                return [
+                    ...history,
+                    {
+                        at: new Date().toISOString(),
+                        actor: "관리자",
+                        action,
+                        note: note || "",
+                        uid: user?.uid || ""
+                    }
+                ];
+            };
+
+            const saveCase = async () => {
+                if (!selectedCase) return;
+                const statusChanged = detailDraft.status !== selectedCase.status;
+                const history = appendHistory(
+                    selectedCase,
+                    statusChanged ? `상태 변경: ${selectedCase.status || "접수"} → ${detailDraft.status}` : "상세 내용 저장",
+                    statusChanged ? "처리 상태 업데이트" : "담당자/메모/결과 업데이트"
+                );
+                const patch = {
+                    status: detailDraft.status,
+                    handler: detailDraft.handler,
+                    adminMemo: detailDraft.adminMemo,
+                    outcome: detailDraft.outcome,
+                    history,
+                    updatedAt: window.firestore.serverTimestamp()
+                };
+                await window.firestore.updateDoc(
+                    window.firestore.doc(window.db, 'artifacts', APP_ID, 'public', 'data', 'complaint_cases', selectedCase.id),
+                    patch
+                );
+                setSelectedCase({ ...selectedCase, ...patch });
+                alert("저장되었습니다.");
+            };
+
+            const quickStatus = async (item, nextStatus) => {
+                const history = appendHistory(item, `상태 변경: ${item.status || "접수"} → ${nextStatus}`, "목록에서 빠른 변경");
+                await window.firestore.updateDoc(
+                    window.firestore.doc(window.db, 'artifacts', APP_ID, 'public', 'data', 'complaint_cases', item.id),
+                    { status: nextStatus, history, updatedAt: window.firestore.serverTimestamp() }
+                );
+            };
+
+            const deleteCase = async (item) => {
+                if (!confirm(`${item.caseNo || "선택 건"}을 삭제하시겠습니까? 삭제된 접수 건은 복구할 수 없습니다.`)) return;
+                await window.firestore.deleteDoc(
+                    window.firestore.doc(window.db, 'artifacts', APP_ID, 'public', 'data', 'complaint_cases', item.id)
+                );
+                if (selectedCase?.id === item.id) setSelectedCase(null);
+            };
+
+            const statusTone = (status) => {
+                if (status === "종결") return "bg-green-100 text-green-700 border-green-200";
+                if (status === "조사중" || status === "조치중") return "bg-blue-100 text-blue-700 border-blue-200";
+                if (status === "보류") return "bg-slate-100 text-slate-600 border-slate-200";
+                return "bg-orange-100 text-orange-700 border-orange-200";
+            };
+
+            return (
+                <div className="space-y-6 fade-in">
+                    <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-6">
+                        <div className="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4 mb-6">
+                            <div>
+                                <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">
+                                    <Icon name="inbox" className="text-blue-600"/> 고충 처리함
+                                </h2>
+                                <p className="text-sm text-slate-500 mt-2">기준 기간: <span className="font-bold text-slate-700">{currentPeriod}</span></p>
+                            </div>
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 lg:min-w-[520px]">
+                                <div className="bg-slate-50 border border-slate-200 rounded-xl p-3">
+                                    <p className="text-xs text-slate-500 font-bold">전체</p>
+                                    <p className="text-2xl font-black text-slate-800">{stats.total}</p>
+                                </div>
+                                <div className="bg-orange-50 border border-orange-100 rounded-xl p-3">
+                                    <p className="text-xs text-orange-600 font-bold">미종결</p>
+                                    <p className="text-2xl font-black text-orange-700">{stats.open}</p>
+                                </div>
+                                <div className="bg-red-50 border border-red-100 rounded-xl p-3">
+                                    <p className="text-xs text-red-600 font-bold">고위험</p>
+                                    <p className="text-2xl font-black text-red-700">{stats.high}</p>
+                                </div>
+                                <div className="bg-blue-50 border border-blue-100 rounded-xl p-3">
+                                    <p className="text-xs text-blue-600 font-bold">보호요청</p>
+                                    <p className="text-2xl font-black text-blue-700">{stats.protection}</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-5">
+                            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="접수번호, 제목, 부서 검색" className="md:col-span-2 border border-slate-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-100" />
+                            <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)} className="border border-slate-200 rounded-lg px-3 py-2.5 text-sm bg-white">
+                                <option value="전체">상태 전체</option>
+                                {CASE_STATUS_OPTIONS.map(status => <option key={status} value={status}>{status}</option>)}
+                            </select>
+                            <select value={riskFilter} onChange={e => setRiskFilter(e.target.value)} className="border border-slate-200 rounded-lg px-3 py-2.5 text-sm bg-white">
+                                <option value="전체">리스크 전체</option>
+                                <option value="high">높음</option>
+                                <option value="medium">보통</option>
+                                <option value="low">낮음</option>
+                            </select>
+                        </div>
+
+                        <div className="overflow-x-auto border border-slate-200 rounded-xl">
+                            <table className="w-full text-sm text-left">
+                                <thead className="bg-slate-50 text-slate-600">
+                                    <tr>
+                                        <th className="p-3 border-b">접수번호</th>
+                                        <th className="p-3 border-b">제목</th>
+                                        <th className="p-3 border-b">부서</th>
+                                        <th className="p-3 border-b">유형</th>
+                                        <th className="p-3 border-b">리스크</th>
+                                        <th className="p-3 border-b">상태</th>
+                                        <th className="p-3 border-b">접수일</th>
+                                        <th className="p-3 border-b text-center">관리</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                    {loading ? (
+                                        <tr><td colSpan="8" className="p-8 text-center text-slate-500">접수 건을 불러오는 중...</td></tr>
+                                    ) : filteredCases.length === 0 ? (
+                                        <tr><td colSpan="8" className="p-8 text-center text-slate-500">조건에 맞는 접수 건이 없습니다.</td></tr>
+                                    ) : (
+                                        filteredCases.map(item => (
+                                            <tr key={item.id} className="hover:bg-slate-50">
+                                                <td className="p-3 font-mono text-xs text-slate-500 whitespace-nowrap">{item.caseNo || item.id.slice(0, 8)}</td>
+                                                <td className="p-3 min-w-[220px]">
+                                                    <button onClick={() => openCase(item)} className="font-bold text-slate-800 hover:text-blue-700 text-left">{item.subject || "-"}</button>
+                                                    <p className="text-xs text-slate-400 mt-1 line-clamp-1">{item.details}</p>
+                                                </td>
+                                                <td className="p-3 whitespace-nowrap">{item.teamName}</td>
+                                                <td className="p-3 whitespace-nowrap">{getCategoryLabel(item.category)}</td>
+                                                <td className="p-3 whitespace-nowrap"><RiskBadge level={item.riskLevel} /></td>
+                                                <td className="p-3 whitespace-nowrap">
+                                                    <select value={item.status || "접수"} onChange={e => quickStatus(item, e.target.value)} className={`border rounded-lg px-2 py-1 text-xs font-bold ${statusTone(item.status)}`}>
+                                                        {CASE_STATUS_OPTIONS.map(status => <option key={status} value={status}>{status}</option>)}
+                                                    </select>
+                                                </td>
+                                                <td className="p-3 text-xs text-slate-500 whitespace-nowrap">{formatDateTime(item.createdAt)}</td>
+                                                <td className="p-3 text-center whitespace-nowrap">
+                                                    <button onClick={() => openCase(item)} className="text-blue-600 hover:bg-blue-50 p-1.5 rounded" title="상세 보기"><Icon name="eye" size={16} /></button>
+                                                    <button onClick={() => deleteCase(item)} className="text-slate-400 hover:text-red-600 hover:bg-red-50 p-1.5 rounded" title="삭제"><Icon name="trash-2" size={16} /></button>
+                                                </td>
+                                            </tr>
+                                        ))
+                                    )}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    {selectedCase && (
+                        <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-[100] p-4 fade-in backdrop-blur-sm">
+                            <div className="bg-white rounded-xl shadow-2xl max-w-5xl w-full max-h-[92vh] overflow-hidden border border-slate-200 flex flex-col">
+                                <div className="p-5 border-b border-slate-100 flex items-start justify-between gap-4">
+                                    <div>
+                                        <div className="flex flex-wrap items-center gap-2 mb-2">
+                                            <span className="font-mono text-xs text-slate-500">{selectedCase.caseNo}</span>
+                                            <RiskBadge level={selectedCase.riskLevel} />
+                                            <span className={`px-2.5 py-1 rounded-full text-xs font-bold border ${statusTone(detailDraft.status)}`}>{detailDraft.status}</span>
+                                        </div>
+                                        <h3 className="text-lg font-bold text-slate-900">{selectedCase.subject}</h3>
+                                        <p className="text-sm text-slate-500 mt-1">{selectedCase.teamName} · {getCategoryLabel(selectedCase.category)} · 긴급도 {getUrgencyLabel(selectedCase.urgency)}</p>
+                                    </div>
+                                    <button onClick={() => setSelectedCase(null)} className="text-slate-400 hover:text-slate-700"><Icon name="x" size={22} /></button>
+                                </div>
+
+                                <div className="grid grid-cols-1 lg:grid-cols-5 gap-0 overflow-y-auto">
+                                    <div className="lg:col-span-3 p-5 space-y-5 border-r border-slate-100">
+                                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                                            <div className="bg-slate-50 rounded-lg p-3"><p className="text-xs text-slate-400">접수방식</p><p className="font-bold text-slate-800">{selectedCase.reporterMode === "named" ? "기명" : "익명"}</p></div>
+                                            <div className="bg-slate-50 rounded-lg p-3"><p className="text-xs text-slate-400">발생일</p><p className="font-bold text-slate-800">{selectedCase.incidentDate || "-"}</p></div>
+                                            <div className="bg-slate-50 rounded-lg p-3"><p className="text-xs text-slate-400">보호요청</p><p className="font-bold text-slate-800">{selectedCase.protectionRequest === "yes" ? "요청" : "없음"}</p></div>
+                                            <div className="bg-slate-50 rounded-lg p-3"><p className="text-xs text-slate-400">연락동의</p><p className="font-bold text-slate-800">{selectedCase.allowContact === "yes" ? "동의" : "미동의"}</p></div>
+                                        </div>
+
+                                        {selectedCase.reporterMode === "named" && (
+                                            <div className="bg-blue-50 border border-blue-100 rounded-xl p-4">
+                                                <h4 className="font-bold text-blue-900 text-sm mb-2">신고자 정보</h4>
+                                                <p className="text-sm text-blue-900">성명: {selectedCase.reporterName || "-"} · 연락처: {selectedCase.contact || "-"}</p>
+                                            </div>
+                                        )}
+
+                                        <div>
+                                            <h4 className="font-bold text-slate-800 mb-2">상세 내용</h4>
+                                            <div className="whitespace-pre-wrap text-sm text-slate-700 leading-relaxed bg-slate-50 border border-slate-100 rounded-xl p-4 min-h-[150px]">{selectedCase.details}</div>
+                                        </div>
+
+                                        <div>
+                                            <h4 className="font-bold text-slate-800 mb-2">희망 조치</h4>
+                                            <div className="whitespace-pre-wrap text-sm text-slate-700 leading-relaxed bg-slate-50 border border-slate-100 rounded-xl p-4">{selectedCase.desiredAction || "-"}</div>
+                                        </div>
+
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                            <div>
+                                                <h4 className="font-bold text-slate-800 mb-2">관련자/관련부서</h4>
+                                                <p className="text-sm text-slate-700 bg-slate-50 border border-slate-100 rounded-xl p-4">{selectedCase.relatedParty || "-"}</p>
+                                            </div>
+                                            <div>
+                                                <h4 className="font-bold text-slate-800 mb-2">리스크 플래그</h4>
+                                                <div className="bg-slate-50 border border-slate-100 rounded-xl p-4 min-h-[54px]">
+                                                    {(selectedCase.riskFlags || []).length === 0 ? (
+                                                        <p className="text-sm text-slate-500">특이 플래그 없음</p>
+                                                    ) : (
+                                                        <div className="flex flex-wrap gap-2">
+                                                            {selectedCase.riskFlags.map(flag => <span key={flag} className="px-2.5 py-1 rounded-full text-xs font-bold bg-red-50 text-red-700 border border-red-100">{flag}</span>)}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div className="lg:col-span-2 p-5 space-y-4 bg-slate-50">
+                                        <div>
+                                            <label className="block text-xs font-bold text-slate-500 mb-1">처리 상태</label>
+                                            <select value={detailDraft.status} onChange={e => setDetailDraft({...detailDraft, status: e.target.value})} className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm bg-white">
+                                                {CASE_STATUS_OPTIONS.map(status => <option key={status} value={status}>{status}</option>)}
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs font-bold text-slate-500 mb-1">담당자/담당부서</label>
+                                            <input value={detailDraft.handler} onChange={e => setDetailDraft({...detailDraft, handler: e.target.value})} className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm bg-white" placeholder="예: 인사팀 홍길동" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs font-bold text-slate-500 mb-1">관리 메모</label>
+                                            <textarea value={detailDraft.adminMemo} onChange={e => setDetailDraft({...detailDraft, adminMemo: e.target.value})} rows="5" className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm bg-white resize-none" placeholder="초기 검토, 조사 필요사항, 보완자료 등을 기록" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs font-bold text-slate-500 mb-1">처리 결과</label>
+                                            <textarea value={detailDraft.outcome} onChange={e => setDetailDraft({...detailDraft, outcome: e.target.value})} rows="5" className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm bg-white resize-none" placeholder="조치 내용, 통보 여부, 후속관리 기준" />
+                                        </div>
+                                        <button onClick={saveCase} className="w-full bg-blue-600 text-white py-3 rounded-lg font-bold hover:bg-blue-700">저장</button>
+
+                                        <div className="border-t border-slate-200 pt-4">
+                                            <h4 className="font-bold text-slate-800 mb-3">처리 이력</h4>
+                                            <div className="space-y-2 max-h-[220px] overflow-y-auto">
+                                                {(selectedCase.history || []).length === 0 ? (
+                                                    <p className="text-sm text-slate-500">처리 이력이 없습니다.</p>
+                                                ) : (
+                                                    selectedCase.history.slice().reverse().map((h, idx) => (
+                                                        <div key={`${h.at}-${idx}`} className="bg-white border border-slate-200 rounded-lg p-3">
+                                                            <p className="text-xs font-bold text-slate-700">{h.action}</p>
+                                                            <p className="text-[11px] text-slate-400 mt-1">{formatDateTime(h.at)} · {h.actor}</p>
+                                                            {h.note && <p className="text-xs text-slate-500 mt-1">{h.note}</p>}
+                                                        </div>
+                                                    ))
+                                                )}
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
                 </div>
             );
         };
@@ -1360,13 +2025,14 @@
         const Sidebar = ({ currentView, setView, role, isMobileMenuOpen, setIsMobileMenuOpen }) => {
             const adminMenu = [
                 { id: 'dashboard', label: '대시보드', icon: 'layout-dashboard' }, 
+                { id: 'complaints', label: '고충 처리함', icon: 'inbox' },
                 { id: 'teams', label: '팀/조직 관리', icon: 'users' }, 
                 { id: 'analysis', label: '분석 및 개선', icon: 'lightbulb' },
                 { id: 'data', label: '데이터 관리', icon: 'database' }, 
                 { id: 'report', label: '리포트 생성', icon: 'file-text' }, 
                 { id: 'settings', label: '설정', icon: 'settings' }
             ];
-            const empMenu = [{ id: 'survey', label: '조직 진단 (서베이)', icon: 'clipboard-list' }];
+            const empMenu = [{ id: 'survey', label: '고충·의견 접수', icon: 'message-square' }];
             const menu = role === 'admin' ? adminMenu : empMenu;
             
             return (
@@ -1507,7 +2173,7 @@
                                 </button>
                                 
                                 <div>
-                                    <h1 className="text-xl md:text-2xl font-bold text-slate-900 tracking-tight">{role === 'employee' ? '환영합니다!' : 'HR 관리자 콘솔'}</h1>
+                                    <h1 className="text-xl md:text-2xl font-bold text-slate-900 tracking-tight">{role === 'employee' ? '고충·의견 접수' : 'HR 관리자 콘솔'}</h1>
                                     {role === 'admin' && (
                                         <div className="mt-2 flex items-center gap-2">
                                             <p className="hidden md:block text-sm text-blue-600 font-bold">🕒 조회 기간:</p>
@@ -1529,6 +2195,7 @@
                         {role === 'employee' && <SurveyView teamStats={teamStats} currentPeriod={currentPeriod} user={user} />}
                         
                         {role === 'admin' && currentView === 'dashboard' && <DashboardView globalMetrics={globalMetrics} chartData={chartData} teamStats={teamStats} currentPeriod={currentPeriod} user={user} />}
+                        {role === 'admin' && currentView === 'complaints' && <ComplaintManagementView teamStats={teamStats} currentPeriod={currentPeriod} user={user} />}
                         {role === 'admin' && currentView === 'teams' && <TeamManagementView teamStats={teamStats} currentPeriod={currentPeriod} />}
                         {role === 'admin' && currentView === 'analysis' && <AnalysisView teamStats={teamStats} globalMetrics={globalMetrics} chartData={chartData} currentPeriod={currentPeriod} aiConfig={aiConfig} />}
                         {role === 'admin' && currentView === 'data' && <DataManagementView teamStats={teamStats} currentPeriod={currentPeriod} />}
